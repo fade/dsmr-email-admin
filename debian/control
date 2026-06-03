@@ -1,0 +1,43 @@
+Source: dsmr-email-admin
+Section: mail
+Priority: optional
+Maintainer: Brian O'Reilly <fade@deepsky.com>
+Build-Depends: debhelper-compat (= 13)
+Standards-Version: 4.6.2
+Rules-Requires-Root: no
+Homepage: https://github.com/fade/dsmr-email-admin
+Vcs-Git: https://github.com/fade/dsmr-email-admin.git
+Vcs-Browser: https://github.com/fade/dsmr-email-admin
+
+Package: dsmr-email-admin
+Architecture: all
+Depends: ${misc:Depends},
+ qmail (>= 1.06.3),
+ vpopmail (>= 5.6.13),
+ dovecot-core (>= 2.4),
+ postgresql-client
+Recommends: dsmr-qmail-run (>= 1.0-9),
+ dsmr-checkpassword-dovecot,
+ daemontools
+Description: administration and health-check tool for the DSMR mail stack
+ dsmr-email-admin is a command-line tool for operators of the DSMR
+ qmail/vpopmail/dovecot mail stack.  It generalises the recurring
+ verification-and-repair steps a stack accumulates when a control or
+ configuration file predates a packaging fix: a postinst that only creates
+ a file "if absent" never repairs an existing one on upgrade.
+ .
+ The 'check' subcommand runs a read-only health check across packages,
+ services, the PostgreSQL backend, dovecot authentication, the qmail-smtpd
+ softlimit, relay rules, and listening ports.
+ .
+ The 'fix' subcommand repairs the known stale-config faults, each behind a
+ detector so nothing the admin set deliberately is overwritten:
+   - a qmail softlimit too low for the OpenSSL/krb5 library footprint
+     (which makes qmail-smtpd fail to start);
+   - vpopmail.pgsql with its password and database fields swapped;
+   - a dovecot SQL connection file out of sync with vpopmail.pgsql;
+   - a stopped or unenabled vpopmail PostgreSQL cluster.
+ .
+ The 'selftest' subcommand proves delivery and dovecot authentication end to
+ end using a throwaway vpopmail mailbox that it then removes.  Every fix backs
+ up the file it changes before writing.

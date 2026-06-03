@@ -1,0 +1,346 @@
+#!/bin/bash
+# dsmr-email-admin — health check and repair for the DSMR qmail/vpopmail/dovecot
+# mail stack.  Generalises the manual verification-and-fix steps that recur on
+# DSMR hosts whose control/config files predate a packaging fix (a postinst that
+# only creates a file "if absent" never repairs an existing one on upgrade).
+#
+# Subcommands:
+#   check                Read-only health check of the whole stack.
+#   fix [--dry-run] [TARGET...]
+#                        Repair detected issues.  TARGETs:
+#                          softlimit pgsql-config dovecot-sql pg-cluster
+#                        With no TARGET, fixes every issue detected.
+#   selftest [ADDR]      End-to-end probe: create a throwaway vpopmail mailbox,
+#                        inject a message, confirm delivery + dovecot auth, then
+#                        clean up.  Mutating but self-contained.
+#   version | help
+#
+# Fixes back up every file they touch (<file>.bak-<timestamp>) and never rewrite
+# a value the admin set deliberately beyond the known-bad cases below.
+#
+# 🄯 Brian O'Reilly <fade@deepsky.com>, 2026
+
+set -uo pipefail
+
+VPOPMAIL_PGSQL=/home/vpopmail/etc/vpopmail.pgsql
+DOVECOT_SQL=/etc/dovecot/dovecot-vpopmail-sql.conf.ext
+QCONTROL=/var/lib/qmail/control
+SOFTLIMIT_FILE="$QCONTROL/softlimit"
+SOFTLIMIT_MIN=100000000
+VPOPBIN=/home/vpopmail/bin
+QBIN=/var/lib/qmail/bin
+
+green='\033[0;32m'; red='\033[0;31m'; yellow='\033[0;33m'; reset='\033[0m'
+PASS=0; FAIL=0; WARN=0
+ok()   { printf "${green}PASS${reset} %s\n" "$1"; PASS=$((PASS+1)); }
+bad()  { printf "${red}FAIL${reset} %s\n" "$1"; FAIL=$((FAIL+1)); }
+warn() { printf "${yellow}WARN${reset} %s\n" "$1"; WARN=$((WARN+1)); }
+info() { printf "     %s\n" "$1"; }
+die()  { echo "dsmr-email-admin: error: $*" >&2; exit 1; }
+need_root() { [ "$(id -u)" -eq 0 ] || die "must run as root"; }
+
+# Locate the daemontools scan directory that supervises qmail.
+svdir() {
+    local d
+    for d in /etc/service /service /var/lib/qmail/supervise; do
+        [ -d "$d/qmail-send" ] && { echo "$d"; return 0; }
+    done
+    echo /etc/service
+}
+SV="$(svdir)"
+
+# Parse vpopmail.pgsql (host|port|user|password|database) into PG_* globals.
+PG_HOST=""; PG_PORT=""; PG_USER=""; PG_PASS=""; PG_DB=""
+load_pg_config() {
+    [ -f "$VPOPMAIL_PGSQL" ] || return 1
+    IFS='|' read -r PG_HOST PG_PORT PG_USER PG_PASS PG_DB \
+        < <(grep -vE '^\s*#|^\s*$' "$VPOPMAIL_PGSQL" | head -1)
+    [ -n "$PG_HOST" ] && [ -n "$PG_PORT" ] && [ -n "$PG_USER" ]
+}
+
+# ── detectors (return 0 when the named problem is present) ─────────────────────
+
+softlimit_value() { tr -cd '0-9' < "$SOFTLIMIT_FILE" 2>/dev/null; }
+softlimit_low() {
+    local v; v="$(softlimit_value)"
+    [ -n "$v" ] && [ "$v" -lt "$SOFTLIMIT_MIN" ]
+}
+
+# True when vpopmail.pgsql has password/database swapped: the file as written
+# can't authenticate, but swapping fields 4 and 5 can.
+pgsql_swapped() {
+    command -v psql >/dev/null 2>&1 || return 1
+    PGPASSWORD="$PG_PASS" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" \
+        -d "$PG_DB" -tAc 'SELECT 1' >/dev/null 2>&1 && return 1
+    PGPASSWORD="$PG_DB" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" \
+        -d "$PG_PASS" -tAc 'SELECT 1' >/dev/null 2>&1
+}
+
+# Echo "ver cluster status" for the postgres cluster on the vpopmail port.
+pg_cluster_row() {
+    command -v pg_lsclusters >/dev/null 2>&1 || return 1
+    pg_lsclusters -h 2>/dev/null | awk -v p="$PG_PORT" '$3==p{print $1, $2, $4; found=1} END{exit !found}'
+}
+pg_cluster_down() {
+    local row; row="$(pg_cluster_row)" || return 1
+    [ "$(echo "$row" | awk '{print $3}')" != "online" ]
+}
+
+# True when the generated dovecot SQL conf disagrees with vpopmail.pgsql.
+dovecot_sql_stale() {
+    [ -f "$DOVECOT_SQL" ] || return 1
+    local cdb cuser cpass
+    cdb=$(sed -n 's/^[[:space:]]*dbname[[:space:]]*=[[:space:]]*//p'   "$DOVECOT_SQL")
+    cuser=$(sed -n 's/^[[:space:]]*user[[:space:]]*=[[:space:]]*//p'    "$DOVECOT_SQL")
+    cpass=$(sed -n 's/^[[:space:]]*password[[:space:]]*=[[:space:]]*//p' "$DOVECOT_SQL")
+    [ "$cdb" = "$PG_DB" ] && [ "$cuser" = "$PG_USER" ] && [ "$cpass" = "$PG_PASS" ] && return 1
+    return 0
+}
+
+# ── check ─────────────────────────────────────────────────────────────────────
+cmd_check() {
+    need_root
+    echo "=== DSMR mail stack health check ==="
+    echo
+
+    echo "--- packages ---"
+    local pkg st
+    for pkg in qmail vpopmail dovecot-core dovecot-pgsql dovecot-vpopmail \
+               dsmr-qmail-run dsmr-checkpassword-dovecot; do
+        st=$(dpkg-query -W -f='${db:Status-Abbrev}' "$pkg" 2>/dev/null)
+        [ "$st" = "ii " ] && ok "$pkg installed" || warn "$pkg not installed ($st)"
+    done
+    echo
+
+    echo "--- services ---"
+    pgrep -x svscan >/dev/null && ok "svscan running" || bad "svscan not running"
+    systemctl is-active --quiet dovecot && ok "dovecot active" || bad "dovecot inactive"
+    local s
+    for s in qmail-send qmail-smtpd qmail-submission; do
+        if command -v svstat >/dev/null 2>&1 && svstat "$SV/$s" 2>/dev/null | grep -q ": up"; then
+            ok "$s up"; else warn "$s not up"; fi
+    done
+    echo
+
+    echo "--- postgresql backend ---"
+    if load_pg_config; then
+        ok "vpopmail.pgsql parsed (host=$PG_HOST port=$PG_PORT db=$PG_DB)"
+        if pg_cluster_down; then
+            bad "postgres cluster on port $PG_PORT is down — run: dsmr-email-admin fix pg-cluster"
+        else
+            local row; row="$(pg_cluster_row 2>/dev/null)"
+            [ -n "$row" ] && ok "postgres cluster online ($row)" || info "cluster status unknown (not a local pg cluster?)"
+        fi
+        if "$VPOPBIN"/vdominfo >/dev/null 2>&1 || ! "$VPOPBIN"/vdominfo 2>&1 | grep -qi password; then
+            ok "vpopmail authenticates to postgres"
+        else
+            bad "vpopmail cannot authenticate to postgres"
+        fi
+        if pgsql_swapped; then
+            bad "vpopmail.pgsql has password/database fields SWAPPED — run: dsmr-email-admin fix pgsql-config"
+        else
+            ok "vpopmail.pgsql field order correct"
+        fi
+        if dovecot_sql_stale; then
+            bad "dovecot SQL conf out of sync with vpopmail.pgsql — run: dsmr-email-admin fix dovecot-sql"
+        else
+            ok "dovecot SQL conf matches vpopmail.pgsql"
+        fi
+    else
+        bad "cannot read/parse $VPOPMAIL_PGSQL"
+    fi
+    echo
+
+    echo "--- qmail-smtpd softlimit (OpenSSL+krb5 load) ---"
+    local sv; sv="$(softlimit_value)"
+    if softlimit_low; then
+        bad "softlimit is $sv (< $SOFTLIMIT_MIN) — smtpd may fail to load; run: dsmr-email-admin fix softlimit"
+    else
+        ok "softlimit is ${sv:-unset} (>= $SOFTLIMIT_MIN)"
+    fi
+    # Active proof: does smtpd actually greet on :25?
+    if command -v python3 >/dev/null 2>&1; then
+        if python3 - <<'PY' 2>/dev/null
+import socket,sys
+s=socket.create_connection(("127.0.0.1",25),5)
+sys.exit(0 if s.recv(64).startswith(b"220") else 1)
+PY
+        then ok "smtpd :25 greets (220)"; else bad "smtpd :25 did not greet — check softlimit / libraries"; fi
+    fi
+    echo
+
+    echo "--- relay rules ---"
+    local f
+    for f in tcp.smtp tcp.submission; do
+        if grep -q 'RELAYCLIENT' "$QCONTROL/$f" 2>/dev/null; then
+            ok "$f has a RELAYCLIENT rule (localhost relay)"
+        else
+            warn "$f has no RELAYCLIENT rule"
+        fi
+    done
+    echo
+
+    echo "--- listening ports ---"
+    local p
+    for p in 25 587 143 993; do
+        if ss -tlnH "( sport = :$p )" 2>/dev/null | grep -q .; then ok "port $p listening"; else warn "port $p not listening"; fi
+    done
+    echo
+
+    echo "=== summary: ${PASS} pass, ${WARN} warn, ${FAIL} fail ==="
+    [ "$FAIL" -eq 0 ] || { echo "Run 'dsmr-email-admin fix' to repair, or 'fix --dry-run' to preview."; return 1; }
+    return 0
+}
+
+# ── fixes ─────────────────────────────────────────────────────────────────────
+DRY=0
+backup() { cp -a "$1" "$1.bak-$(date +%Y%m%d-%H%M%S)"; }
+
+fix_softlimit() {
+    local cur; cur="$(softlimit_value)"
+    if ! softlimit_low; then info "softlimit OK (${cur:-unset})"; return 0; fi
+    if [ "$DRY" = 1 ]; then echo "  would: set $SOFTLIMIT_FILE 100000000 (was $cur); restart smtpd+submission"; return 0; fi
+    need_root
+    backup "$SOFTLIMIT_FILE"
+    printf '%s\n' "$SOFTLIMIT_MIN" > "$SOFTLIMIT_FILE"
+    svc -t "$SV/qmail-smtpd" "$SV/qmail-submission" 2>/dev/null || true
+    ok "softlimit raised to $SOFTLIMIT_MIN; restarted smtpd + submission"
+}
+
+fix_pg_cluster() {
+    load_pg_config || { bad "cannot read $VPOPMAIL_PGSQL"; return 1; }
+    if ! pg_cluster_down; then info "postgres cluster on port $PG_PORT already online"; return 0; fi
+    local ver clu; read -r ver clu _ < <(pg_cluster_row)
+    [ -n "$ver" ] || { bad "no local pg cluster found on port $PG_PORT"; return 1; }
+    if [ "$DRY" = 1 ]; then echo "  would: pg_ctlcluster $ver $clu start; systemctl enable postgresql@$ver-$clu"; return 0; fi
+    need_root
+    pg_ctlcluster "$ver" "$clu" start || systemctl start "postgresql@$ver-$clu"
+    systemctl enable "postgresql@$ver-$clu" >/dev/null 2>&1 || true
+    ok "started + enabled postgres cluster $ver/$clu (port $PG_PORT)"
+}
+
+fix_pgsql_config() {
+    load_pg_config || { bad "cannot read $VPOPMAIL_PGSQL"; return 1; }
+    if ! pgsql_swapped; then info "vpopmail.pgsql field order OK"; return 0; fi
+    if [ "$DRY" = 1 ]; then echo "  would: swap password/database fields in $VPOPMAIL_PGSQL, then regenerate dovecot SQL conf"; return 0; fi
+    need_root
+    backup "$VPOPMAIL_PGSQL"
+    local tmp; tmp=$(mktemp)
+    awk -F'|' 'BEGIN{OFS="|"} {t=$4;$4=$5;$5=t} 1' "$VPOPMAIL_PGSQL" > "$tmp"
+    chown root:vchkpw "$tmp" 2>/dev/null || true; chmod 640 "$tmp"
+    mv -f "$tmp" "$VPOPMAIL_PGSQL"
+    ok "swapped vpopmail.pgsql password/database fields"
+    load_pg_config
+    fix_dovecot_sql
+}
+
+# Regenerate the dovecot pgsql connection conf from vpopmail.pgsql (matches the
+# dovecot-vpopmail postinst format).
+fix_dovecot_sql() {
+    load_pg_config || { bad "cannot read $VPOPMAIL_PGSQL"; return 1; }
+    if ! dovecot_sql_stale; then info "dovecot SQL conf already matches vpopmail.pgsql"; return 0; fi
+    if [ "$DRY" = 1 ]; then echo "  would: regenerate $DOVECOT_SQL from vpopmail.pgsql; reload dovecot"; return 0; fi
+    need_root
+    [ -f "$DOVECOT_SQL" ] && backup "$DOVECOT_SQL"
+    local port_line=""
+    case "$PG_PORT" in 5432|0|"") ;; *) port_line="    port = ${PG_PORT}" ;; esac
+    {
+        echo "# PostgreSQL connection for vpopmail authentication (generated by dsmr-email-admin)."
+        echo "sql_driver = pgsql"
+        echo "pgsql ${PG_HOST} {"
+        echo "  parameters {"
+        echo "    dbname = ${PG_DB}"
+        echo "    user = ${PG_USER}"
+        echo "    password = ${PG_PASS}"
+        [ -n "$port_line" ] && echo "$port_line"
+        echo "  }"
+        echo "}"
+    } > "$DOVECOT_SQL"
+    chown root:dovecot "$DOVECOT_SQL"; chmod 640 "$DOVECOT_SQL"
+    doveadm reload 2>/dev/null || systemctl reload dovecot 2>/dev/null || true
+    ok "regenerated dovecot SQL conf and reloaded dovecot"
+}
+
+cmd_fix() {
+    local targets=()
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run|-n) DRY=1 ;;
+            softlimit|pgsql-config|dovecot-sql|pg-cluster) targets+=("$1") ;;
+            *) die "unknown fix target: $1 (softlimit pgsql-config dovecot-sql pg-cluster)" ;;
+        esac
+        shift
+    done
+    [ "$DRY" = 1 ] && echo "(dry-run — no changes will be made)"
+    if [ "${#targets[@]}" -eq 0 ]; then targets=(pg-cluster pgsql-config dovecot-sql softlimit); fi
+    local t
+    for t in "${targets[@]}"; do
+        echo "==> $t"
+        case "$t" in
+            softlimit)    fix_softlimit ;;
+            pg-cluster)   fix_pg_cluster ;;
+            pgsql-config) fix_pgsql_config ;;
+            dovecot-sql)  fix_dovecot_sql ;;
+        esac
+    done
+}
+
+# ── selftest (mutating, self-contained) ───────────────────────────────────────
+cmd_selftest() {
+    need_root
+    load_pg_config || die "cannot read $VPOPMAIL_PGSQL"
+    local dom user pass vdir before after rc=0
+    dom="${1:-}"
+    if [ -z "$dom" ]; then
+        dom=$("$VPOPBIN"/vdominfo 2>/dev/null | awk '/^domain:/{print $2; exit}')
+        [ -n "$dom" ] || die "no vpopmail domain found; pass one: dsmr-email-admin selftest <domain>"
+    fi
+    user="dsmr-selftest-$$@${dom}"; pass="St!$$test"
+    echo "selftest domain: $dom (throwaway user $user)"
+    "$VPOPBIN"/vadduser "$user" "$pass" >/dev/null 2>&1 || die "vadduser failed"
+    vdir=$("$VPOPBIN"/vuserinfo "$user" 2>/dev/null | awk '/^dir:/{print $2}')
+
+    before=$(find "$vdir/Maildir/new" -type f 2>/dev/null | wc -l)
+    printf 'From: selftest@%s\r\nTo: %s\r\nSubject: dsmr selftest\r\n\r\nbody\r\n' "$(hostname -f)" "$user" \
+        | "$QBIN/qmail-inject" -f "selftest@$(hostname -f)" "$user"
+    sleep 3
+    after=$(find "$vdir/Maildir/new" -type f 2>/dev/null | wc -l)
+    [ "$after" -gt "$before" ] && ok "virtual delivery ($before -> $after)" || bad "virtual delivery failed"
+
+    if doveadm auth test "$user" "$pass" 2>&1 | grep -q 'auth succeeded'; then
+        ok "dovecot authentication (pgsql passdb)"; else bad "dovecot authentication failed"; rc=1; fi
+
+    "$VPOPBIN"/vdeluser "$user" >/dev/null 2>&1 || warn "could not delete throwaway user $user"
+    echo "=== selftest: ${PASS} pass, ${FAIL} fail ==="
+    [ "$FAIL" -eq 0 ] && return 0 || return 1
+}
+
+usage() {
+    cat <<EOF
+Usage: dsmr-email-admin <command> [args]
+
+  check                Read-only health check of the DSMR mail stack.
+  fix [--dry-run] [TARGET...]
+                       Repair detected issues.  TARGETs:
+                         softlimit     raise control/softlimit to ${SOFTLIMIT_MIN}
+                         pgsql-config  fix swapped vpopmail.pgsql password/database
+                         dovecot-sql   regenerate dovecot SQL conf from vpopmail.pgsql
+                         pg-cluster    start + enable the vpopmail postgres cluster
+                       With no TARGET, fixes everything detected.
+  selftest [DOMAIN]    End-to-end delivery + auth probe (creates and removes a
+                       throwaway vpopmail mailbox).
+  version | help
+
+Fixes back up each file (<file>.bak-<timestamp>) before changing it.
+EOF
+}
+
+cmd="${1:-}"; shift || true
+case "$cmd" in
+    check)            cmd_check "$@" ;;
+    fix)              cmd_fix "$@" ;;
+    selftest)         cmd_selftest "$@" ;;
+    version|--version) echo "dsmr-email-admin 1.0" ;;
+    -h|--help|help|"") usage ;;
+    *) die "unknown command: $cmd (try: dsmr-email-admin --help)" ;;
+esac

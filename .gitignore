@@ -1,0 +1,15 @@
+# debian build outputs
+debian/.debhelper/
+debian/dsmr-email-admin/
+debian/dsmr-email-admin.substvars
+debian/dsmr-email-admin.debhelper.log
+debian/debhelper-build-stamp
+debian/files
+debian/*.log
+
+# parent-dir build outputs (dpkg-buildpackage drops them next door)
+../dsmr-email-admin_*.deb
+../dsmr-email-admin_*.buildinfo
+../dsmr-email-admin_*.changes
+../dsmr-email-admin_*.dsc
+../dsmr-email-admin_*.tar.*

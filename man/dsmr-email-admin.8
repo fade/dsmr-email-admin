@@ -1,0 +1,65 @@
+.TH DSMR-EMAIL-ADMIN 8 "2026" "dsmr-email-admin 1.0" "DSMR mail stack"
+.SH NAME
+dsmr-email-admin \- health check and repair for the DSMR mail stack
+.SH SYNOPSIS
+.B dsmr-email-admin
+.I command
+.RI [ args ]
+.SH DESCRIPTION
+.B dsmr-email-admin
+audits and repairs a DSMR qmail/vpopmail/dovecot mail host.  It targets the
+faults that recur when a control or configuration file predates a packaging
+fix: a postinst that only creates a file when absent never repairs an existing
+one on upgrade, so a host first provisioned before the fix keeps the old value.
+.SH COMMANDS
+.TP
+.B check
+Read-only health check across packages, services, the PostgreSQL backend,
+dovecot authentication, the qmail-smtpd softlimit, relay rules, and listening
+ports.  Exits non-zero if any check fails.
+.TP
+.B fix \fR[\fB--dry-run\fR] [\fITARGET\fR...]
+Repair detected issues.  Each fix runs only when its detector fires, and backs
+up the file it changes as \fI<file>.bak-<timestamp>\fR.  Targets:
+.RS
+.TP
+.B softlimit
+Raise \fI/var/lib/qmail/control/softlimit\fR to 100000000 when it is lower,
+then restart qmail-smtpd and qmail-submission.  qmail-smtpd links OpenSSL and
+krb5 and fails to start under a low address-space cap.
+.TP
+.B pgsql-config
+Swap the password and database fields of \fI/home/vpopmail/etc/vpopmail.pgsql\fR
+when they are reversed, then regenerate the dovecot SQL conf.
+.TP
+.B dovecot-sql
+Regenerate \fI/etc/dovecot/dovecot-vpopmail-sql.conf.ext\fR from vpopmail.pgsql
+and reload dovecot.
+.TP
+.B pg-cluster
+Start and enable the PostgreSQL cluster on the port vpopmail uses.
+.RE
+.IP
+With no target, every detected issue is fixed.
+.TP
+.B selftest \fR[\fIDOMAIN\fR]
+Create a throwaway vpopmail mailbox, inject a message, confirm delivery and
+dovecot authentication, then remove the mailbox.
+.TP
+.B version \fR|\fB help
+Print version or usage.
+.SH FILES
+.TP
+.I /home/vpopmail/etc/vpopmail.pgsql
+vpopmail PostgreSQL connection (host|port|user|password|database).
+.TP
+.I /var/lib/qmail/control/softlimit
+Address-space cap applied to qmail-smtpd and qmail-submission.
+.TP
+.I /etc/dovecot/dovecot-vpopmail-sql.conf.ext
+dovecot PostgreSQL connection, derived from vpopmail.pgsql.
+.SH SEE ALSO
+.BR dsmr-smtpauth (8),
+.BR qmailctl (8)
+.SH AUTHOR
+Brian O'Reilly <fade@deepsky.com>

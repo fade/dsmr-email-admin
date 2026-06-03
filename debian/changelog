@@ -1,0 +1,11 @@
+dsmr-email-admin (1.0-1) trixie; urgency=low
+
+  * Initial release.  Health-check and repair tool for the DSMR
+    qmail/vpopmail/dovecot stack.  'check' runs a read-only audit; 'fix'
+    repairs stale control/config left by create-if-absent postinsts (a low
+    qmail softlimit, swapped vpopmail.pgsql password/database fields, a
+    dovecot SQL conf out of sync with vpopmail.pgsql, and a stopped vpopmail
+    PostgreSQL cluster); 'selftest' proves delivery and dovecot auth end to
+    end with a throwaway vpopmail mailbox.
+
+ -- Brian O'Reilly <fade@deepsky.com>  Wed, 03 Jun 2026 12:11:30 -0400
