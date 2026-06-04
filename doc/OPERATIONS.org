@@ -1,0 +1,204 @@
+#+TITLE: DSMR Mail Stack — Operations Manual
+#+OPTIONS: toc:2 num:t
+
+* Scope
+
+Day-to-day operation of a DSMR qmail/vpopmail/dovecot mail host: keeping the
+stack healthy, authenticating outbound mail so it reaches Gmail/Yahoo, and
+keeping the sending IP's reputation clean. The =dsmr-email-admin= tool is the
+single entry point for all of this; this manual is the why and the when behind
+its subcommands.
+
+Run everything as root on the mail host. Every mutating action backs up the
+file it changes (=<file>.bak-<timestamp>=) and acts only when its detector
+fires, so a value set deliberately is left alone.
+
+* 1. Health and self-healing configuration
+
+Several stack control files are written by a package postinst *only if absent*
+— correct for files holding live credentials, but it means a host first
+provisioned before a packaging fix keeps the old, broken value forever. The
+recurring faults and their repair:
+
+| Symptom                                              | Cause                                   | Fix                              |
+|------------------------------------------------------+-----------------------------------------+----------------------------------|
+| smtpd dies "failed to map segment" (libgssapi/krb5)  | control/softlimit too low for OpenSSL3  | =fix softlimit=                  |
+| vpopmail/dovecot can't auth to PostgreSQL            | vpopmail.pgsql password/database swapped| =fix pgsql-config=               |
+| dovecot auth returns temp_fail                       | dovecot SQL conf out of sync            | =fix dovecot-sql=                |
+| no virtual-user auth/delivery; lost after reboot     | vpopmail's pg cluster stopped/disabled  | =fix pg-cluster=                 |
+
+#+begin_src sh
+dsmr-email-admin check                 # read-only audit of the whole stack
+dsmr-email-admin fix --dry-run         # preview repairs
+dsmr-email-admin fix                   # apply all detected repairs
+dsmr-email-admin selftest              # prove delivery + dovecot auth end to end
+#+end_src
+
+*Run =check= after every package upgrade.* The postinsts do not self-heal an
+existing file, so an upgrade can ship a fix that a long-lived host never adopts.
+
+* 2. Sender authentication for virtual domains (SPF / DKIM / DMARC)
+
+Since 2024 Gmail and Yahoo reject mail whose domain authenticates with neither
+SPF nor DKIM (=550-5.7.26 ... the sender is unauthenticated=). On a multi-domain
+host typically only the primary domain is signed, so every other hosted domain
+is undeliverable to the big providers until it gets an SPF record and a DKIM key.
+
+** What the tool does, and does not, do
+
+It provisions the *signing* side (generates and installs the DKIM key so
+qmail-dkim signs the domain's outbound mail immediately) and writes
+copy-pasteable DNS records to =control/authdns/<domain>=. It *never writes to a
+nameserver* — hosted domains use a mix of in-house and external-registrar DNS,
+so the operator publishes the records by hand.
+
+#+begin_src sh
+dsmr-email-admin authdns status        # per-domain coverage: key / DKIM-DNS / SPF / DMARC
+dsmr-email-admin authdns report        # narrative: who is covered, who is blocked, and why
+dsmr-email-admin authdns provision <domain>     # install key + write the record file
+cat /var/lib/qmail/control/authdns/<domain>     # paste these at the domain's DNS host
+dsmr-email-admin authdns verify <domain>        # confirm published DNS matches the local key
+#+end_src
+
+** Care point: only provision domains that actually send through this host
+
+A domain hosted here for *mail receipt* may *send* through an external service.
+Its existing SPF will point elsewhere (or be a =-all= lockdown). Installing a
+local key and publishing our records for such a domain *breaks its real mail*.
+=authdns provision-all= therefore skips any domain that already publishes SPF or
+DKIM (=--include-external= overrides). Before provisioning, sanity-check with
+=authdns status=: a domain showing existing SPF/DKIM is managed elsewhere — leave
+it alone.
+
+Defaults: RSA-2048 keys, selector =default=, SPF =~all= (softfail, like the
+primary domain). Use =spf suggest --hard= for =-all= once you are sure a domain
+sends only through this host.
+
+* 3. Outbound reputation and backscatter
+
+The single biggest reputation killer on a multi-domain MTA is *backscatter*: the
+host accepts mail to a local recipient that then *fails delivery*, and qmail
+bounces it to the (usually forged) envelope sender. Spammers forge senders at
+throwaway domains, so the host sprays misdirected bounces at those domains and
+receivers flag the IP for "unsolicited mail". Backscatter is almost always a
+*recipient-validation* problem: mail that should be rejected at RCPT is instead
+accepted and bounced.
+
+** Diagnose
+
+#+begin_src sh
+dsmr-email-admin reputation audit
+#+end_src
+
+Reports the share of the queue that is null-sender bounces (the backscatter
+fingerprint), lists the accept-then-bounce recipients found in queued failure
+notices, and classifies each as:
+
+- *a real user with broken delivery* — the account exists but has no =Maildir=
+  (e.g. an off-system forward was removed and nothing replaced it). Fix: create
+  the user's Maildir so mail lands instead of bouncing
+  (=maildirmake ~user/Maildir=, owned by the user, mode 700), or, if the account
+  is defunct, stop its mail from bouncing.
+- *a non-existent account* — accepted at RCPT and bounced at delivery. This is a
+  gate gap; see the alias catch-all below.
+
+The audit also flags a =~alias/.qmail-default= that runs =fastforward= without
+=-p= (which bounces unknown recipients), and counts mailbox forwards to external
+freemail (forwarding spam onward re-emits it from this IP and hurts reputation —
+filter before forwarding, or do not forward spam).
+
+** Test the recipient gate as a real sender
+
+#+begin_src sh
+dsmr-email-admin reputation probe nosuchuser@yourdomain.example
+#+end_src
+
+This connects to the host's *own public IP* (not 127.0.0.1, which is a
+RELAYCLIENT and would accept anything), so it shows what an outside sender
+actually gets. A =250= for a deliberately-invalid address means the gate
+accepts-then-bounces — a backscatter faucet. A =550= means it rejects cleanly.
+(Needed because a commercial ISP and many clouds block outbound port 25, so you
+often cannot probe :25 from elsewhere; the loopback-to-public-IP path is the
+reliable way to see the external view from the host itself.)
+
+** Stop the bleeding, in order
+
+1. *Close the faucet first.* Fix the broken mailbox, or stop the catch-all from
+   bouncing — otherwise the queue refills as fast as you drain it.
+2. *Then purge the backscatter:*
+   #+begin_src sh
+   dsmr-email-admin reputation purge            # dry-run: count
+   dsmr-email-admin reputation purge --commit   # delete (briefly stops qmail-send)
+   #+end_src
+   Only null-sender =failure notice= messages are removed; real queued mail
+   (which has a sender) is untouched.
+
+** The fastforward alias catch-all (a classic system-domain faucet)
+
+On a =locals= (system) domain, qmail routes any local-part that is not a real
+=/home= user to the =alias= user. If =~alias/.qmail-default= is
+=| fastforward <cdb>=, fastforward *bounces* any address not found in the cdb
+(its default =-P= behaviour). So spam to =madeup@systemdomain= is accepted
+(the catch-all exists) and then bounced — backscatter, regardless of any RCPT
+gate that treats "a catch-all exists" as "deliverable".
+
+- *Interim:* add =-p= so unmatched addresses pass through and are dropped instead
+  of bounced: =| fastforward -p -d /etc/aliases.cdb=. Stops the backscatter but
+  silently discards unknown mail.
+- *Proper:* the recipient gate must *reject unknown system addresses at RCPT*
+  by consulting the same cdb fastforward uses (keys are
+  =:<lowercased-localpart>@<domain>=, empty domain = any host; lookup order
+  =:lp@host=, =:lp@=, =:@host=, =:@=). Then real aliases are accepted, unknowns
+  get an immediate 550, and nothing is ever accepted only to bounce.
+
+* 4. The recipient-validation gate (localfirst)
+
+=localfirst-rcptcheck= replaces chkuser as the sole RCPT gate, so it can accept
+system-user and qmail-extension recipients that the vpopmail-only chkuser could
+not see. It is *opt-in*: the smtpd/submission run scripts switch to it only when
+=control/localfirst= first line is =1=. Installing the binary never changes
+validation on its own — a host opts into system-first routing deliberately.
+
+Per recipient: a domain not in rcpthosts is a relay target (accept; AUTH+tcprules
+already enforced it); a =locals= domain validates against the system layer only
+(real /home users, qmail extension addressing, ~alias/.qmail); a
+=localfirstdomains= domain is hybrid (system first, then vpopmail); any other
+local domain is pure vpopmail (=vrcptcheck=). A confirmed backend outage *defers*
+(451), never rejects.
+
+Known behaviours to keep in mind:
+
+- *fail-open on private homes.* The validator runs as the smtpd user (vpopmail),
+  which cannot traverse a mode-700 home, so it accepts every *extension* of such
+  a user and lets delivery decide. On a host with world-traversable homes
+  (751/755) extensions are validated precisely. Keep system homes 751, not 700,
+  if you want precise extension rejection.
+- *catch-all blind spot.* It treats "a =.qmail-default= exists" as deliverable,
+  which is wrong when the catch-all is a conditional forwarder (fastforward) —
+  see §3. Until the gate consults the cdb, use the fastforward =-p= interim.
+
+* 5. Care-and-feeding checklist
+
+- *After any package upgrade:* =dsmr-email-admin check= (postinsts do not
+  self-heal existing config).
+- *Adding a virtual domain that sends through this host:* =authdns provision
+  <domain>=, publish the records, =authdns verify <domain>=.
+- *Periodically, and after any "why is my mail in spam" report:* =authdns report=
+  (authentication coverage) and =reputation audit= (backscatter).
+- *Watch the queue:* =qmail-qstat=. A queue climbing into the hundreds/thousands
+  of mostly-undeliverable messages is backscatter or a compromised account until
+  proven otherwise — run =reputation audit=.
+- *Never accept-then-bounce.* Reject unknown recipients at RCPT. A bouncing
+  catch-all, a removed forward with no replacement mailbox, or an over-broad
+  alias all turn into outbound backscatter that the receiving world blames on
+  this IP.
+
+* 6. Topology notes
+
+- The mail host is the signing and sending MTA; DKIM keys live in
+  =control/domainkeys/<domain>:<selector>= and outbound is signed by qmail-dkim
+  via =control/filterargs= (=DKIMSIGNKEYDIR=).
+- The vpopmail backend is PostgreSQL (=vpopmail.pgsql=); dovecot reads the same
+  credentials via a generated SQL conf. Both are create-if-absent — see §1.
+- The package repository is managed with reprepro on the build host and published
+  to the production host by rsync; the production host is never built on.
