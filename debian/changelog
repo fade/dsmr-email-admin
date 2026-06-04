@@ -1,3 +1,19 @@
+dsmr-email-admin (1.0-5) trixie; urgency=low
+
+  * Add a 'reputation' subcommand for outbound-IP reputation problems:
+      - 'reputation audit': detect backscatter (null-sender bounces in the
+        queue), list the accept-then-bounce recipients and classify each as a
+        real user with broken delivery or a non-existent account, flag a
+        ~alias/.qmail-default fastforward catch-all that bounces unknowns, and
+        count mailbox forwards to external freemail;
+      - 'reputation probe LOCAL@DOMAIN': test the RCPT gate as a real external
+        sender via this host's own public IP (127.0.0.1 is a relayclient and
+        would mask the answer);
+      - 'reputation purge [--commit]': remove null-sender "failure notice"
+        backscatter from the queue, leaving real mail untouched.
+
+ -- Brian O'Reilly <fade@deepsky.com>  Thu, 04 Jun 2026 21:00:00 -0400
+
 dsmr-email-admin (1.0-4) trixie; urgency=low
 
   * authdns provision and provision-all now treat -h/--help as a help request

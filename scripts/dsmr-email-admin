@@ -43,6 +43,9 @@ RELAYHOST="$(hostname -f 2>/dev/null)"
 # touch any nameserver — the operator publishes these by hand.
 AUTHDNS_OUT=/var/lib/qmail/control/authdns
 
+# qmail queue root (for the reputation/backscatter diagnostics).
+QUEUE=/var/lib/qmail/queue
+
 green='\033[0;32m'; red='\033[0;31m'; yellow='\033[0;33m'; reset='\033[0m'
 PASS=0; FAIL=0; WARN=0
 ok()   { printf "${green}PASS${reset} %s\n" "$1"; PASS=$((PASS+1)); }
@@ -676,6 +679,166 @@ cmd_authdns() {
     esac
 }
 
+# ── reputation / backscatter diagnostics ──────────────────────────────────────
+#
+# A host's outbound IP reputation is wrecked when it emits misdirected bounces
+# (backscatter): it accepts mail to a local recipient that then fails delivery,
+# and qmail bounces it to the (usually forged) sender.  Receivers see a flood of
+# unsolicited bounces from the IP and flag it.  These tools detect backscatter,
+# find its source, test the RCPT gate as a real external sender, and purge the
+# backscatter queue.
+
+# Envelope sender of queued message <id>; empty output means a null sender (<>),
+# i.e. a bounce.  Returns non-zero if the message can't be read.
+queue_sender() {
+    local inf; inf=$(ls "$QUEUE"/info/*/"$1" 2>/dev/null | head -1)
+    [ -n "$inf" ] || return 1
+    tr '\0' '\n' < "$inf" | sed -n '1s/^F//p'
+}
+
+reputation_audit() {
+    need_root
+    echo "=== outbound reputation / backscatter audit ==="
+    local ids id s total null=0 real=0
+    ids=$(ls "$QUEUE"/info/*/* 2>/dev/null | xargs -rn1 basename | sort -u)
+    total=$(printf '%s\n' "$ids" | grep -c .)
+    for id in $(printf '%s\n' "$ids" | head -1500); do
+        s=$(queue_sender "$id") || continue
+        if [ -z "$s" ]; then null=$((null+1)); else real=$((real+1)); fi
+    done
+    echo "--- queue ---"
+    echo "messages: $total   (sample: bounce/null-sender=$null  real-sender=$real)"
+    if [ "$total" -gt 50 ] && [ "$null" -gt "$real" ]; then
+        bad "queue is mostly null-sender bounces — BACKSCATTER in progress"
+    else
+        ok "queue not dominated by bounces"
+    fi
+
+    echo "--- accept-then-bounce recipients (from queued failure notices) ---"
+    local tmp; tmp=$(mktemp)
+    local f n=0
+    for f in $(find "$QUEUE/mess" -type f 2>/dev/null | head -1500); do
+        grep -qim1 'failure notice\|invoked for bounce' "$f" 2>/dev/null || continue
+        n=$((n+1))
+        grep -oiE '^<[^>]+@[^>]+>:' "$f" 2>/dev/null | head -1 | sed -E 's/^<//; s/>:$//' >> "$tmp"
+    done
+    if [ "$n" -gt 0 ]; then
+        echo "top bounced recipients (of $n bounces sampled):"
+        sort "$tmp" | uniq -c | sort -rn | head -10 | sed 's/^/  /'
+        echo "classification of the distinct local recipients:"
+        local addr lp dom base
+        for addr in $(sort -u "$tmp" | head -20); do
+            lp=${addr%@*}; dom=${addr#*@}; base=${lp%%-*}
+            if id "$base" >/dev/null 2>&1; then
+                local h; h=$(getent passwd "$base" | cut -d: -f6)
+                if [ -d "$h/Maildir/new" ]; then
+                    info "$addr — real user, Maildir OK (transient?)"
+                else
+                    bad "$addr — REAL user '$base' but no Maildir/new => delivery bounces (create his Maildir)"
+                fi
+            else
+                warn "$addr — no such user '$base' => accepted-then-bounced (RCPT gate gap)"
+            fi
+        done
+    else
+        ok "no failure-notice bounces sampled in the queue"
+    fi
+    rm -f "$tmp"
+
+    echo "--- alias catch-all (a bouncing fastforward is a classic faucet) ---"
+    local ah qd; ah=$(getent passwd alias 2>/dev/null | cut -d: -f6); qd="$ah/.qmail-default"
+    if [ -n "$ah" ] && [ -f "$qd" ]; then
+        if grep -q 'fastforward' "$qd" && ! grep -qE '(^|[[:space:]])-[a-zA-Z]*p' "$qd"; then
+            bad "$qd runs fastforward WITHOUT -p — unknown recipients bounce: $(cat "$qd")"
+            info "fix: add -p (pass-through, no bounce) and reject unknowns at RCPT instead"
+        else
+            ok "$qd: $(cat "$qd")"
+        fi
+    fi
+
+    echo "--- forwarding to external freemail (re-emitted spam hurts the IP) ---"
+    local fwd; fwd=$(grep -rhsE '^&[a-zA-Z0-9._%+-]+@(gmail|googlemail|yahoo|hotmail|outlook|live|icloud|aol)\.' \
+                     "$VPOPDOMAINS" 2>/dev/null | wc -l)
+    [ "$fwd" -gt 0 ] && warn "$fwd vpopmail addresses forward to freemail" || ok "no vpopmail freemail forwards"
+    echo "=== ${PASS} pass, ${WARN} warn, ${FAIL} fail ==="
+    [ "$FAIL" -eq 0 ]
+}
+
+# Test the RCPT gate as a real external (non-relayclient) sender.  Connects to
+# this host's OWN public IP, because 127.0.0.1 is a RELAYCLIENT and would accept
+# any recipient, hiding what an outside sender actually sees.  Sends no DATA.
+reputation_probe() {
+    local addr="${1:-}"
+    case "$addr" in ""|-h|--help) echo "usage: dsmr-email-admin reputation probe <local@domain>"; return 0 ;; esac
+    command -v python3 >/dev/null 2>&1 || die "python3 required"
+    local ip; ip=$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' | head -1)
+    [ -n "$ip" ] || ip=$(hostname -I 2>/dev/null | awk '{print $1}')
+    [ -n "$ip" ] || die "could not determine a non-loopback local IP to probe"
+    echo "RCPT probe of <$addr> via non-relayclient path ($ip -> $ip:25):"
+    python3 - "$ip" "$addr" <<'PY'
+import socket, sys
+ip, addr = sys.argv[1], sys.argv[2]
+s = socket.create_connection((ip, 25), timeout=20); s.settimeout(15)
+def rd():
+    try: return s.recv(4096).decode(errors="replace").strip()
+    except Exception: return "(timeout)"
+print("  banner:", rd())
+def cmd(c):
+    s.sendall((c + "\r\n").encode()); print(f"  >> {c}\n     {rd()}")
+cmd("EHLO reputation-probe.invalid")
+cmd("MAIL FROM:<reputation-probe@example.com>")
+cmd(f"RCPT TO:<{addr}>")
+cmd("QUIT"); s.close()
+PY
+    echo "  (250 on a deliberately-invalid address = the gate accepts-then-bounces"
+    echo "   => backscatter; 550 = it rejects cleanly.)"
+}
+
+# Purge backscatter: messages that are BOTH null-sender AND Subject "failure
+# notice".  Dry-run unless --commit.  Stops qmail-send for the surgery.
+reputation_purge() {
+    need_root
+    local commit=0; [ "${1:-}" = "--commit" ] && commit=1
+    local ids id s mess match=0 matchids=""
+    ids=$(ls "$QUEUE"/info/*/* 2>/dev/null | xargs -rn1 basename | sort -u)
+    for id in $ids; do
+        s=$(queue_sender "$id") || continue
+        [ -z "$s" ] || continue
+        mess=$(ls "$QUEUE"/mess/*/"$id" 2>/dev/null | head -1); [ -n "$mess" ] || continue
+        grep -qm1 '^Subject: failure notice' "$mess" 2>/dev/null || continue
+        match=$((match+1)); matchids="$matchids $id"
+    done
+    echo "backscatter (null-sender + failure notice): $match message(s)"
+    [ "$commit" = 1 ] || { echo "(dry-run; re-run 'reputation purge --commit' to delete)"; return 0; }
+    local sdir=""
+    for d in /service/qmail-send /etc/service/qmail-send /var/lib/qmail/supervise/qmail-send; do
+        [ -d "$d" ] && { sdir="$d"; break; }
+    done
+    [ -n "$sdir" ] || die "qmail-send service dir not found"
+    echo "stopping qmail-send..."; svc -d "$sdir"; sleep 2
+    local del=0
+    for id in $matchids; do
+        rm -f "$QUEUE"/mess/*/"$id" "$QUEUE"/info/*/"$id" "$QUEUE"/local/*/"$id" \
+              "$QUEUE"/remote/*/"$id" "$QUEUE"/intd/*/"$id" "$QUEUE"/todo/*/"$id" \
+              "$QUEUE"/bounce/"$id" 2>/dev/null
+        del=$((del+1))
+    done
+    echo "restarting qmail-send..."; svc -u "$sdir"; sleep 2
+    ok "purged $del backscatter messages"
+    "$QBIN/qmail-qstat" 2>/dev/null || true
+}
+
+cmd_reputation() {
+    local action="${1:-audit}"; shift || true
+    case "$action" in
+        audit|"")  reputation_audit "$@" ;;
+        probe)     reputation_probe "$@" ;;
+        purge)     reputation_purge "$@" ;;
+        -h|--help) echo "usage: dsmr-email-admin reputation {audit | probe <local@domain> | purge [--commit]}" ;;
+        *) die "unknown reputation action: $action (audit probe purge)" ;;
+    esac
+}
+
 usage() {
     cat <<EOF
 Usage: dsmr-email-admin <command> [args]
@@ -712,6 +875,10 @@ Usage: dsmr-email-admin <command> [args]
   authdns report [-o FILE]        Narrative findings + ramifications across domains.
   authdns verify DOMAIN           Run spf verify + dkim verify.
 
+  reputation audit                Detect backscatter and find its source.
+  reputation probe LOCAL@DOMAIN   Test the RCPT gate as a real external sender.
+  reputation purge [--commit]     Purge null-sender "failure notice" backscatter.
+
   version | help
 
 Fixes back up each file (<file>.bak-<timestamp>) before changing it.
@@ -728,6 +895,7 @@ case "$cmd" in
     dkim)             cmd_dkim "$@" ;;
     spf)              cmd_spf "$@" ;;
     authdns)          cmd_authdns "$@" ;;
+    reputation)       cmd_reputation "$@" ;;
     version|--version) echo "dsmr-email-admin 1.0" ;;
     -h|--help|help|"") usage ;;
     *) die "unknown command: $cmd (try: dsmr-email-admin --help)" ;;
