@@ -78,8 +78,11 @@ Report whether the published SPF record authorizes the sending host.
 .B authdns provision \fIDOMAIN\fR
 Convenience wrapper for \fBdkim genkey\fR plus the record file.
 .TP
-.B authdns provision-all
-Provision every vpopmail domain that has no signing key yet.
+.B authdns provision-all \fR[\fB--include-external\fR]
+Provision every vpopmail domain that has no sender authentication yet.  Domains
+that already publish an SPF or DKIM record are skipped: such a domain sends
+through some other path, and installing a key here would break it.  Use
+\fB--include-external\fR to provision those too.
 .TP
 .B authdns status \fR[\fIDOMAIN\fR]
 Coverage table across the audited domains: signing key present, and whether the

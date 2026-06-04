@@ -612,15 +612,30 @@ cmd_authdns() {
             cmd_dkim genkey "$domain" "$@"
             ;;
         provision-all)
+            # Only provision domains that have NO sender authentication yet.  A
+            # domain that already publishes SPF or DKIM is sending through some
+            # other path (an external ESP, a different MTA) — installing an
+            # outrider key and republishing its records would break that.  Such
+            # domains are skipped unless --include-external is given.
+            local force_ext=0 passthru=()
+            while [ $# -gt 0 ]; do case "$1" in
+                --include-external) force_ext=1; shift ;;
+                *) passthru+=("$1"); shift ;;
+            esac; done
             need_root
             local keydir; keydir="$(dkim_keydir)"
-            local d kf made=0 skipped=0
-            for d in $(ls "$VPOPDOMAINS" 2>/dev/null | sort); do
+            local d kf k kd sp dm made=0 keyed=0 ext=0
+            for d in $(all_authdns_domains); do
                 kf="$keydir/$d:$DKIM_SELECTOR"
-                if [ -f "$kf" ]; then info "skip $d (key exists)"; skipped=$((skipped+1)); continue; fi
-                echo "==> $d"; cmd_dkim genkey "$d" "$@" && made=$((made+1))
+                if [ -f "$kf" ]; then info "skip $d (key already installed)"; keyed=$((keyed+1)); continue; fi
+                read -r k kd sp dm <<<"$(authdns_domain_state "$d")"
+                if [ "$force_ext" != 1 ] && { [ "$sp" = yes ] || [ "$kd" = yes ]; }; then
+                    warn "skip $d (already publishes SPF/DKIM — managed elsewhere; --include-external to override)"
+                    ext=$((ext+1)); continue
+                fi
+                echo "==> $d"; cmd_dkim genkey "$d" "${passthru[@]}" && made=$((made+1))
             done
-            echo "=== provisioned $made, skipped $skipped; record files in $AUTHDNS_OUT ==="
+            echo "=== provisioned $made; skipped $keyed keyed, $ext externally-managed; record files in $AUTHDNS_OUT ==="
             ;;
         status)
             local only="${1:-}"
@@ -687,7 +702,9 @@ Usage: dsmr-email-admin <command> [args]
   spf verify DOMAIN    Confirm the published SPF authorizes the sending host.
 
   authdns provision DOMAIN        genkey DOMAIN + write its record file.
-  authdns provision-all           Provision every domain missing a key.
+  authdns provision-all [--include-external]
+                                  Provision every domain with no SPF/DKIM yet
+                                  (skips externally-managed domains).
   authdns status [DOMAIN]         Coverage table: key / DKIM-DNS / SPF / DMARC.
   authdns report [-o FILE]        Narrative findings + ramifications across domains.
   authdns verify DOMAIN           Run spf verify + dkim verify.
