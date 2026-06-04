@@ -1,3 +1,11 @@
+dsmr-email-admin (1.0-4) trixie; urgency=low
+
+  * authdns provision and provision-all now treat -h/--help as a help request
+    instead of an argument, so 'provision-all --help' prints usage rather than
+    provisioning every domain.
+
+ -- Brian O'Reilly <fade@deepsky.com>  Thu, 04 Jun 2026 20:00:00 -0400
+
 dsmr-email-admin (1.0-3) trixie; urgency=low
 
   * authdns provision-all now skips any domain that already publishes an SPF or

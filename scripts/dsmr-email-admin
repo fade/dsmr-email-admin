@@ -607,8 +607,10 @@ cmd_authdns() {
     local action="${1:-}"; shift || true
     case "$action" in
         provision)
-            local domain="${1:-}"; shift || true
-            [ -n "$domain" ] || die "usage: authdns provision <domain> [dkim genkey opts]"
+            case "${1:-}" in
+                ""|-h|--help) echo "usage: dsmr-email-admin authdns provision <domain> [-s sel] [-b bits] [--force]"; return 0 ;;
+            esac
+            local domain="$1"; shift
             cmd_dkim genkey "$domain" "$@"
             ;;
         provision-all)
@@ -619,6 +621,7 @@ cmd_authdns() {
             # domains are skipped unless --include-external is given.
             local force_ext=0 passthru=()
             while [ $# -gt 0 ]; do case "$1" in
+                -h|--help) echo "usage: dsmr-email-admin authdns provision-all [--include-external] [-b bits] [-s sel]"; return 0 ;;
                 --include-external) force_ext=1; shift ;;
                 *) passthru+=("$1"); shift ;;
             esac; done
