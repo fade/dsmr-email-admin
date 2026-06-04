@@ -100,6 +100,26 @@ Writes to \fIFILE\fR with \fB-o\fR, otherwise to standard output.
 .TP
 .B authdns verify \fIDOMAIN\fR
 Run \fBspf verify\fR and \fBdkim verify\fR for one domain.
+.TP
+.B reputation audit
+Diagnose outbound-IP reputation problems.  Reports the share of the queue that
+is null-sender bounces (backscatter), lists the accept-then-bounce recipients
+found in queued failure notices and classifies each as a real user with broken
+delivery or a non-existent account, flags a \fB~alias/.qmail-default\fR that runs
+\fBfastforward\fR without \fB-p\fR (which bounces unknown recipients), and counts
+mailbox forwards to external freemail.
+.TP
+.B reputation probe \fILOCAL@DOMAIN\fR
+Test the RCPT recipient gate as a real external sender would see it, by
+connecting to this host's own public IP (a non-relayclient path; 127.0.0.1 is a
+RELAYCLIENT and would accept anything).  Sends no message body.  A 250 for a
+deliberately-invalid address means the gate accepts-then-bounces (backscatter);
+a 550 means it rejects cleanly.
+.TP
+.B reputation purge \fR[\fB--commit\fR]
+Purge backscatter from the queue: messages that are both null-sender and
+Subject "failure notice".  Dry-run unless \fB--commit\fR, which briefly stops
+qmail-send for the deletion.  Real queued mail (which has a sender) is untouched.
 .IP
 DKIM/SPF management never writes to a nameserver.  Record files are written to
 \fI/var/lib/qmail/control/authdns/<DOMAIN>\fR for the operator to publish by

@@ -83,6 +83,31 @@ The record file gives each TXT in both registrar-form (host + value) and
 zone-file form. SPF defaults to `~all`; use `spf suggest --hard` for `-all`
 once you are sure a domain sends only through this host.
 
+## Outbound reputation / backscatter
+
+A multi-domain MTA gets its sending IP flagged ("unsolicited mail") when it
+emits **backscatter** — it accepts mail to a local recipient that then fails
+delivery, and bounces it to the (usually forged) sender. The `reputation`
+subcommand finds and fixes that:
+
+```sh
+# diagnose: how much of the queue is backscatter, which recipients cause it
+# (real user with a broken mailbox vs non-existent account), and whether a
+# fastforward alias catch-all is bouncing unknowns
+sudo dsmr-email-admin reputation audit
+
+# test the RCPT gate as a real external sender (not 127.0.0.1, which is a
+# relayclient and accepts anything): 250 for an invalid address means the gate
+# accepts-then-bounces; 550 means it rejects cleanly
+sudo dsmr-email-admin reputation probe nobody-xyz@example.com
+
+# purge the misdirected bounces (null-sender "failure notice" only)
+sudo dsmr-email-admin reputation purge
+sudo dsmr-email-admin reputation purge --commit
+```
+
+## See also
+
 The companion tool [`dsmr-smtpauth(8)`](https://github.com/fade/dsmr-checkpassword-dovecot)
 manages the SMTP-AUTH relay allow-list; `dsmr-email-admin` audits the stack
 those credentials run on.
