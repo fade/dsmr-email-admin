@@ -1,3 +1,24 @@
+dsmr-email-admin (1.0-2) trixie; urgency=low
+
+  * Add DKIM/SPF management for virtual domains so unsigned hosted domains can
+    pass Gmail/Yahoo sender authentication.  New subcommands:
+      - 'dkim list|genkey|show|verify': generate and install an RSA DKIM
+        signing key (qmail-dkim signs the domain's outbound mail immediately)
+        and verify the published key against the local one;
+      - 'spf suggest|verify': recommend and check an SPF record for the
+        sending host;
+      - 'authdns provision|provision-all|status|report|verify': provision one
+        or all domains, show per-domain DKIM/SPF/DMARC coverage, and emit a
+        narrative findings report that classifies each domain and explains the
+        deliverability ramifications (Gmail/Yahoo 550-5.7.26).
+    The audit set includes the system domain (any keyed domain), not only the
+    vpopmail virtual domains.  Records are written as copy-pasteable files to
+    control/authdns/<domain> for manual DNS publication; no nameserver is ever
+    written to.
+  * Recommends openssl (key generation) and bind9-dnsutils (DNS verification).
+
+ -- Brian O'Reilly <fade@deepsky.com>  Thu, 04 Jun 2026 18:00:00 -0400
+
 dsmr-email-admin (1.0-1) trixie; urgency=low
 
   * Initial release.  Health-check and repair tool for the DSMR
