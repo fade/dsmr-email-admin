@@ -1,3 +1,14 @@
+dsmr-email-admin (1.0-6) trixie; urgency=low
+
+  * Ship doc/OPERATIONS.org, an operations manual for the DSMR mail stack:
+    health/self-healing config, SPF/DKIM provisioning for virtual domains (with
+    the "only sign domains that send through this host" caveat), outbound
+    reputation and backscatter (diagnosis, the fastforward catch-all faucet, the
+    accept-then-bounce rule, queue purge), the localfirst recipient gate and its
+    known behaviours, and a care-and-feeding checklist.
+
+ -- Brian O'Reilly <fade@deepsky.com>  Thu, 04 Jun 2026 21:30:00 -0400
+
 dsmr-email-admin (1.0-5) trixie; urgency=low
 
   * Add a 'reputation' subcommand for outbound-IP reputation problems:
