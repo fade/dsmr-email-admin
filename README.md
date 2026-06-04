@@ -74,7 +74,8 @@ sudo cat /var/lib/qmail/control/authdns/example.com   # paste these at your DNS 
 # after publishing, confirm DNS matches the installed key
 sudo dsmr-email-admin authdns verify example.com
 
-# provision every domain that has no key yet
+# provision every domain that has no SPF/DKIM yet
+# (skips domains that already publish either — those send via another path)
 sudo dsmr-email-admin authdns provision-all
 ```
 

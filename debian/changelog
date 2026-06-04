@@ -1,3 +1,14 @@
+dsmr-email-admin (1.0-3) trixie; urgency=low
+
+  * authdns provision-all now skips any domain that already publishes an SPF or
+    DKIM record: such a domain sends through another path (an external mail
+    service or a different MTA), and installing a local key plus republishing
+    its records would break that delivery.  --include-external overrides.  This
+    makes bulk provisioning safe on a host where some virtual domains are
+    hosted for mail but actually send elsewhere.
+
+ -- Brian O'Reilly <fade@deepsky.com>  Thu, 04 Jun 2026 19:30:00 -0400
+
 dsmr-email-admin (1.0-2) trixie; urgency=low
 
   * Add DKIM/SPF management for virtual domains so unsigned hosted domains can
