@@ -18,7 +18,9 @@ Depends: ${misc:Depends},
  postgresql-client
 Recommends: dsmr-qmail-run (>= 1.0-9),
  dsmr-checkpassword-dovecot,
- daemontools
+ daemontools,
+ openssl,
+ bind9-dnsutils
 Description: administration and health-check tool for the DSMR mail stack
  dsmr-email-admin is a command-line tool for operators of the DSMR
  qmail/vpopmail/dovecot mail stack.  It generalises the recurring
@@ -41,3 +43,11 @@ Description: administration and health-check tool for the DSMR mail stack
  The 'selftest' subcommand proves delivery and dovecot authentication end to
  end using a throwaway vpopmail mailbox that it then removes.  Every fix backs
  up the file it changes before writing.
+ .
+ The 'dkim', 'spf', and 'authdns' subcommands provision sender authentication
+ for virtual domains: they generate and install a DKIM signing key (so
+ qmail-dkim signs the domain's outbound mail), audit per-domain DKIM/SPF/DMARC
+ coverage, and write copy-pasteable DNS records to control/authdns/<domain> for
+ manual publication.  They never write to a nameserver.  This addresses the
+ large-provider requirement (Gmail/Yahoo) that mail authenticate with SPF or
+ DKIM, which otherwise leaves every unsigned hosted domain undeliverable.
