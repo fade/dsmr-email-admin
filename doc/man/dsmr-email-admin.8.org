@@ -1,0 +1,118 @@
+#+TITLE: dsmr-email-admin
+
+* NAME
+dsmr-email-admin - health check and repair for the DSMR mail stack
+
+* SYNOPSIS
+*dsmr-email-admin* /command/ [ /args/ ]
+
+* DESCRIPTION
+*dsmr-email-admin* audits and repairs a DSMR qmail/vpopmail/dovecot mail host,
+and manages sender authentication (SPF/DKIM/DMARC) and outbound-IP reputation.
+It targets the faults that recur when a control or configuration file predates a
+packaging fix: a postinst that only creates a file when absent never repairs an
+existing one on upgrade, so a host first provisioned before the fix keeps the
+old value.
+
+Every mutating action backs up the file it changes as =<file>.bak-<timestamp>=
+and acts only when its detector fires, so a value set deliberately is left
+alone. Run as root on the mail host.
+
+* COMMANDS
+** Health
+- *check* :: Read-only health check across packages, services, the PostgreSQL
+  backend, dovecot authentication, the qmail-smtpd softlimit, relay rules, and
+  listening ports. Exits non-zero if any check fails.
+- *fix* =[--dry-run]= [/TARGET/...] :: Repair detected issues; with no /TARGET/,
+  every detected issue is fixed. Targets: =softlimit= (raise
+  =control/softlimit= to 100000000 when lower — qmail-smtpd links OpenSSL/krb5
+  and fails to start under a low address-space cap — then restart smtpd and
+  submission); =pgsql-config= (swap reversed password/database fields of
+  =vpopmail.pgsql=, then regenerate the dovecot SQL conf); =dovecot-sql=
+  (regenerate =dovecot-vpopmail-sql.conf.ext= from =vpopmail.pgsql= and reload
+  dovecot); =pg-cluster= (start and enable the PostgreSQL cluster vpopmail uses).
+- *selftest* [/DOMAIN/] :: Create a throwaway vpopmail mailbox, inject a message,
+  confirm delivery and dovecot authentication, then remove the mailbox.
+
+** Sender authentication (DKIM / SPF)
+- *dkim list* :: List the vpopmail virtual domains and whether each has a DKIM
+  signing key.
+- *dkim genkey* /DOMAIN/ =[-s selector]= =[-b bits]= =[--force]= :: Generate an
+  RSA DKIM key (default 2048-bit, selector =default=) and install it as
+  =<keydir>/<DOMAIN>:<selector>= so qmail-dkim signs outbound /DOMAIN/ mail
+  immediately, then write a copy-pasteable record file. =--force= is required to
+  overwrite an existing key (rotating a published selector breaks signatures
+  until DNS catches up). The key directory comes from =DKIMSIGNKEYDIR= in
+  =control/filterargs=, else =control/domainkeys=.
+- *dkim show* /DOMAIN/ :: Rewrite and print /DOMAIN/'s record file from its key.
+- *dkim verify* /DOMAIN/ :: Query DNS and report whether the published
+  =<selector>._domainkey.<DOMAIN>= TXT matches the local signing key.
+- *spf suggest* /DOMAIN/ =[--hard|--soft]= =[--relay HOST]= :: Print the
+  recommended SPF record. The default authorizes the sending host with a =~all=
+  softfail; =--hard= uses =-all=.
+- *spf verify* /DOMAIN/ :: Report whether the published SPF record authorizes the
+  sending host.
+
+** Provisioning (authdns)
+- *authdns provision* /DOMAIN/ :: Convenience wrapper for *dkim genkey* plus the
+  record file.
+- *authdns provision-all* =[--include-external]= :: Provision every vpopmail
+  domain that has no sender authentication yet. Domains that already publish SPF
+  or DKIM are skipped (they send through some other path; installing a key here
+  would break them); =--include-external= provisions those too.
+- *authdns status* [/DOMAIN/] :: Coverage table across the audited domains:
+  signing key present, and whether the DKIM, SPF, and DMARC records are
+  published. The audited set is the vpopmail virtual domains plus any other
+  domain that already has a signing key (such as the system domain).
+- *authdns report* =[-o FILE]= :: Narrative findings report. Classifies every
+  audited domain as fully authenticated (SPF+DKIM), minimally authenticated (one
+  of the two), or unauthenticated (neither), notes any domain signed locally but
+  not yet published, and explains the deliverability consequence — chiefly that
+  unauthenticated domains are rejected by Gmail and Yahoo (=550-5.7.26=).
+- *authdns verify* /DOMAIN/ :: Run *spf verify* and *dkim verify* for one domain.
+
+DKIM/SPF management never writes to a nameserver. Record files are written to
+=/var/lib/qmail/control/authdns/<DOMAIN>= for the operator to publish by hand,
+since the hosted domains use a mix of in-house and external-registrar DNS.
+
+** Reputation and backscatter
+- *reputation audit* :: Diagnose outbound-IP reputation problems. Reports the
+  share of the queue that is null-sender bounces (backscatter), lists the
+  accept-then-bounce recipients found in queued failure notices and classifies
+  each as a real user with broken delivery or a non-existent account, flags a
+  =~alias/.qmail-default= that runs *fastforward* without =-p= (which bounces
+  unknown recipients), and counts mailbox forwards to external freemail.
+- *reputation probe* /LOCAL@DOMAIN/ :: Test the RCPT gate as a real external
+  sender would see it, by connecting to this host's own public IP (a
+  non-relayclient path; 127.0.0.1 is a RELAYCLIENT and would accept anything).
+  Sends no message body. A 250 for a deliberately-invalid address means the gate
+  accepts-then-bounces (backscatter); a 550 means it rejects cleanly.
+- *reputation purge* =[--commit]= :: Purge backscatter from the queue (messages
+  that are both null-sender and Subject "failure notice"). Dry-run unless
+  =--commit=, which briefly stops qmail-send for the deletion. Real queued mail
+  (which has a sender) is untouched.
+
+** Other
+- *version* | *help* :: Print version or usage.
+
+* FILES
+- =/home/vpopmail/etc/vpopmail.pgsql= :: vpopmail PostgreSQL connection
+  (=host|port|user|password|database=).
+- =/var/lib/qmail/control/softlimit= :: Address-space cap applied to qmail-smtpd
+  and qmail-submission.
+- =/etc/dovecot/dovecot-vpopmail-sql.conf.ext= :: dovecot PostgreSQL connection,
+  derived from =vpopmail.pgsql=.
+- =/var/lib/qmail/control/domainkeys/<domain>:<selector>= :: DKIM private signing
+  key (and =.pub=) read by qmail-dkim.
+- =/var/lib/qmail/control/authdns/<domain>= :: Generated, copy-pasteable
+  SPF/DKIM/DMARC records for manual DNS publication.
+
+* SEE ALSO
+*qmailctl*(8), *system-identity*(8), *qmail-dkim*(8), *fastforward*(1)
+
+The full operations manual — theory of operation, the email-flow architecture,
+hook points, and debugging hints — is the /dsmr-email-admin/ info manual
+(=info dsmr-email-admin=) and the stack documentation website.
+
+* AUTHOR
+Brian O'Reilly <fade@deepsky.com>
