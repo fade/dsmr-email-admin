@@ -254,6 +254,24 @@ dsmr-email-admin selftest              # prove delivery + dovecot auth end to en
 *Run =check= after every package upgrade.* The postinsts do not self-heal an
 existing file, so an upgrade can ship a fix that a long-lived host never adopts.
 
+** Rotating the PostgreSQL backend password
+
+When the vpopmail role's password must change — a suspected exposure, or routine
+hygiene — =rotate= does it in one step instead of the manual =ALTER ROLE= +
+edit-=vpopmail.pgsql= + regenerate-dovecot-conf dance:
+
+#+begin_src sh
+dsmr-email-admin rotate --dry-run      # show what would change
+dsmr-email-admin rotate                # generate + apply a new password
+#+end_src
+
+It generates a 24-character password, runs =ALTER ROLE= on the role vpopmail
+uses, rewrites the password field of =vpopmail.pgsql= (keeping a timestamped
+backup), then regenerates the dovecot SQL conf and reloads dovecot. =vchkpw=
+re-reads =vpopmail.pgsql= per authentication, so SMTP AUTH follows with no
+restart. The new password is never printed; it lives only in =vpopmail.pgsql=
+and the database. The command needs superuser (peer-auth) access to the cluster.
+
 * 2. Sender authentication for virtual domains (SPF / DKIM / DMARC)
 
 Since 2024 Gmail and Yahoo reject mail whose domain authenticates with neither

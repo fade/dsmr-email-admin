@@ -10,6 +10,9 @@
 #                        Repair detected issues.  TARGETs:
 #                          softlimit pgsql-config dovecot-sql pg-cluster
 #                        With no TARGET, fixes every issue detected.
+#   rotate [--dry-run] [pgsql-password]
+#                        Rotate the vpopmail PostgreSQL role password (ALTER ROLE
+#                        + rewrite vpopmail.pgsql + regenerate dovecot SQL conf).
 #   selftest [ADDR]      End-to-end probe: create a throwaway vpopmail mailbox,
 #                        inject a message, confirm delivery + dovecot auth, then
 #                        clean up.  Mutating but self-contained.
@@ -299,6 +302,93 @@ cmd_fix() {
             dovecot-sql)  fix_dovecot_sql ;;
         esac
     done
+}
+
+# ── rotate (mutating: changes the PostgreSQL role password) ────────────────────
+
+# Generate a fresh role password, ALTER ROLE in PostgreSQL, rewrite the password
+# field of vpopmail.pgsql, then regenerate the dovecot SQL conf so every consumer
+# follows in one step.  vchkpw re-reads vpopmail.pgsql on each auth, so SMTP AUTH
+# needs no restart; dovecot is reloaded by fix_dovecot_sql.  The new password is
+# never printed — it lives only in vpopmail.pgsql (root:vchkpw 640) and the DB.
+rotate_pgsql_password() {
+    load_pg_config || { bad "cannot read $VPOPMAIL_PGSQL"; return 1; }
+    if pgsql_swapped; then
+        bad "vpopmail.pgsql fields are swapped — run 'dsmr-email-admin fix pgsql-config' first"
+        return 1
+    fi
+    if [ "$DRY" = 1 ]; then
+        echo "  would: ALTER ROLE ${PG_USER} with a new 24-char password on the"
+        echo "         cluster at port ${PG_PORT}, rewrite field 4 of ${VPOPMAIL_PGSQL},"
+        echo "         then regenerate ${DOVECOT_SQL} and reload dovecot"
+        return 0
+    fi
+    need_root
+    command -v openssl >/dev/null 2>&1 || { bad "openssl not found (needed to generate a password)"; return 1; }
+    command -v psql    >/dev/null 2>&1 || { bad "psql not found"; return 1; }
+
+    # Confirm superuser (peer-auth) access to the cluster vpopmail actually uses
+    # before touching anything.
+    if ! su -s /bin/sh postgres -c "psql -p '${PG_PORT}' -tAqc 'SELECT 1'" >/dev/null 2>&1; then
+        bad "cannot connect as the postgres superuser to the cluster on port ${PG_PORT}"
+        return 1
+    fi
+
+    # 48 random bytes -> 64 base64 chars; stripping +/= and taking 24 reliably
+    # yields a 24-char alphanumeric password (no '|' or quote chars to escape in
+    # the pipe-delimited file or the SQL string).
+    local newpass
+    newpass=$(openssl rand -base64 48 | tr -d '/+=\n' | head -c 24)
+    [ "${#newpass}" -eq 24 ] || { bad "failed to generate a password"; return 1; }
+
+    # Change the role first; vchkpw re-reads vpopmail.pgsql per auth, so updating
+    # the file immediately after keeps the inconsistency window sub-second.
+    if ! su -s /bin/sh postgres -c \
+            "psql -p '${PG_PORT}' -q -v ON_ERROR_STOP=1 -c \"ALTER ROLE ${PG_USER} WITH PASSWORD '${newpass}';\"" \
+            >/dev/null 2>&1; then
+        bad "ALTER ROLE ${PG_USER} failed; password unchanged"
+        return 1
+    fi
+
+    backup "$VPOPMAIL_PGSQL"
+    local tmp; tmp=$(mktemp)
+    awk -F'|' -v np="$newpass" 'BEGIN{OFS="|"}
+        /^[[:space:]]*#/ || /^[[:space:]]*$/ {print; next}
+        {$4=np} 1' "$VPOPMAIL_PGSQL" > "$tmp"
+    chown root:vchkpw "$tmp" 2>/dev/null || true; chmod 640 "$tmp"
+    mv -f "$tmp" "$VPOPMAIL_PGSQL"
+    load_pg_config
+
+    # Confirm the new password actually authenticates against the role.
+    if PGPASSWORD="$newpass" psql -h "$PG_HOST" -p "$PG_PORT" -U "$PG_USER" \
+            -d "$PG_DB" -tAqc 'SELECT 1' >/dev/null 2>&1; then
+        ok "rotated PostgreSQL password for role ${PG_USER} (written to ${VPOPMAIL_PGSQL}, not displayed)"
+    else
+        bad "ALTER ROLE succeeded but new credentials fail to authenticate — check ${VPOPMAIL_PGSQL} (backup kept)"
+        return 1
+    fi
+
+    # Propagate to dovecot (regenerates from the now-updated vpopmail.pgsql).
+    fix_dovecot_sql
+}
+
+cmd_rotate() {
+    local target=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --dry-run|-n)   DRY=1 ;;
+            pgsql-password) target="$1" ;;
+            -h|--help)      echo "usage: dsmr-email-admin rotate [--dry-run] [pgsql-password]"; return 0 ;;
+            *) die "unknown rotate target: $1 (pgsql-password)" ;;
+        esac
+        shift
+    done
+    [ "$DRY" = 1 ] && echo "(dry-run — no changes will be made)"
+    : "${target:=pgsql-password}"
+    echo "==> rotate $target"
+    case "$target" in
+        pgsql-password) rotate_pgsql_password ;;
+    esac
 }
 
 # ── selftest (mutating, self-contained) ───────────────────────────────────────
@@ -851,6 +941,11 @@ Usage: dsmr-email-admin <command> [args]
                          dovecot-sql   regenerate dovecot SQL conf from vpopmail.pgsql
                          pg-cluster    start + enable the vpopmail postgres cluster
                        With no TARGET, fixes everything detected.
+  rotate [--dry-run] [pgsql-password]
+                       Rotate the vpopmail PostgreSQL role password: generate a
+                       new one, ALTER ROLE, rewrite vpopmail.pgsql, and
+                       regenerate the dovecot SQL conf.  The password is not
+                       printed (it lives only in vpopmail.pgsql and the DB).
   selftest [DOMAIN]    End-to-end delivery + auth probe (creates and removes a
                        throwaway vpopmail mailbox).
 
@@ -891,6 +986,7 @@ cmd="${1:-}"; shift || true
 case "$cmd" in
     check)            cmd_check "$@" ;;
     fix)              cmd_fix "$@" ;;
+    rotate)           cmd_rotate "$@" ;;
     selftest)         cmd_selftest "$@" ;;
     dkim)             cmd_dkim "$@" ;;
     spf)              cmd_spf "$@" ;;

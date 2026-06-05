@@ -31,6 +31,14 @@ alone. Run as root on the mail host.
   =vpopmail.pgsql=, then regenerate the dovecot SQL conf); =dovecot-sql=
   (regenerate =dovecot-vpopmail-sql.conf.ext= from =vpopmail.pgsql= and reload
   dovecot); =pg-cluster= (start and enable the PostgreSQL cluster vpopmail uses).
+- *rotate* =[--dry-run]= [/TARGET/] :: Rotate a backend credential; the only
+  target is =pgsql-password= (the default). It generates a new 24-character
+  password, runs =ALTER ROLE= on the vpopmail PostgreSQL role, rewrites the
+  password field of =vpopmail.pgsql= (backing up the old file), then regenerates
+  the dovecot SQL conf and reloads dovecot. =vchkpw= re-reads =vpopmail.pgsql= on
+  each authentication, so SMTP AUTH needs no restart. The new password is never
+  printed — it lives only in =vpopmail.pgsql= (=root:vchkpw 640=) and the
+  database. Requires superuser (peer-auth) access to the cluster.
 - *selftest* [/DOMAIN/] :: Create a throwaway vpopmail mailbox, inject a message,
   confirm delivery and dovecot authentication, then remove the mailbox.
 

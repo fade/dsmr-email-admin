@@ -1,3 +1,14 @@
+dsmr-email-admin (1.0-10) trixie; urgency=medium
+
+  * Add a 'rotate' subcommand to rotate the vpopmail PostgreSQL role password
+    in one verified step: generate a new password, ALTER ROLE, rewrite
+    vpopmail.pgsql (with a timestamped backup), regenerate the dovecot SQL
+    conf, and reload dovecot.  The password is never printed.  Supports
+    --dry-run.  Removes the need to hand-edit credentials when rotating a
+    suspected-exposed or aged backend password.
+
+ -- Brian O'Reilly <fade@deepsky.com>  Fri, 05 Jun 2026 17:30:00 +0000
+
 dsmr-email-admin (1.0-9) trixie; urgency=low
 
   * Generalize an inline comment for public reuse: a reference that named one
