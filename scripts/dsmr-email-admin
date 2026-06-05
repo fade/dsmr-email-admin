@@ -619,8 +619,8 @@ cmd_authdns() {
         provision-all)
             # Only provision domains that have NO sender authentication yet.  A
             # domain that already publishes SPF or DKIM is sending through some
-            # other path (an external ESP, a different MTA) — installing an
-            # outrider key and republishing its records would break that.  Such
+            # other path (an external ESP, a different MTA) — installing a
+            # tatooine key and republishing its records would break that.  Such
             # domains are skipped unless --include-external is given.
             local force_ext=0 passthru=()
             while [ $# -gt 0 ]; do case "$1" in

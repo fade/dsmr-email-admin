@@ -1,3 +1,11 @@
+dsmr-email-admin (1.0-9) trixie; urgency=low
+
+  * Generalize an inline comment for public reuse: a reference that named one
+    specific production host is replaced with a neutral example hostname.  No
+    behavioural change.
+
+ -- Brian O'Reilly <fade@deepsky.com>  Fri, 05 Jun 2026 16:00:00 +0000
+
 dsmr-email-admin (1.0-8) trixie; urgency=low
 
   * Generate documentation from an org-mode source of truth at build time.
