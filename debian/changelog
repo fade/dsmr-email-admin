@@ -1,3 +1,17 @@
+dsmr-email-admin (1.0-8) trixie; urgency=low
+
+  * Generate documentation from an org-mode source of truth at build time.
+    doc/man/dsmr-email-admin.8.org is the man-page source (pandoc → groff);
+    doc/OPERATIONS.org is exported to a GNU info manual (emacs ox-texinfo →
+    makeinfo, info dsmr-email-admin) and an HTML page (emacs ox-html). The
+    hand-written groff man page is removed; org is now the single source.
+  * Align the email-flow diagram's box right-edges; the diagram, hook points,
+    and control-file reference are unchanged in content.
+  * Build-Depends on emacs-nox | emacs, texinfo, pandoc (generators only — the
+    installed package ships the static man/info/HTML and needs none of them).
+
+ -- Brian O'Reilly <fade@deepsky.com>  Fri, 05 Jun 2026 12:48:21 +0000
+
 dsmr-email-admin (1.0-7) trixie; urgency=low
 
   * OPERATIONS.org: add an Architecture section — package roles, an end-to-end

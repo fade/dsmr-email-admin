@@ -1,3 +1,9 @@
+# generated documentation — org-mode under doc/ is the source of truth
+/man/*.8
+/doc/OPERATIONS.texi
+/doc/dsmr-email-admin.info
+/doc/OPERATIONS.html
+
 # debian build outputs
 debian/.debhelper/
 debian/dsmr-email-admin/

@@ -1,12 +1,39 @@
 #!/usr/bin/make -f
 
+# Documentation is generated from the org-mode source of truth at build time:
+#   doc/man/<name>.<sec>.org -> man/<name>.<sec>          (pandoc, groff man)
+#   doc/OPERATIONS.org       -> dsmr-email-admin.info     (emacs ox-texinfo + makeinfo)
+#                            -> OPERATIONS.html           (emacs ox-html, doc website)
+# Generators (pandoc, emacs, texinfo) are Build-Depends only.
+EMACS ?= emacs
+TOPIC = doc/OPERATIONS
+INFO  = doc/dsmr-email-admin.info
+
 %:
 	dh $@
 
 override_dh_auto_build:
+	mkdir -p man
+	set -e; for m in doc/man/*.org; do \
+	    base=$$(basename "$$m" .org); \
+	    name=$${base%.*}; sec=$${base##*.}; \
+	    pandoc -f org -t man -s \
+	        -M title="$$name" -M section="$$sec" -M date="2026" \
+	        -M header="DSMR mail stack" -M footer="dsmr-email-admin" \
+	        "$$m" -o "man/$$base"; \
+	done
+	$(EMACS) --batch -Q \
+	    --eval "(require 'ox-texinfo)" \
+	    --eval "(with-current-buffer (find-file-noselect \"$(TOPIC).org\") (org-texinfo-export-to-texinfo))"
+	makeinfo --no-split "$(TOPIC).texi" -o "$(INFO)"
+	$(EMACS) --batch -Q \
+	    --eval "(require 'ox-html)" \
+	    --eval "(setq org-html-validation-link nil)" \
+	    --eval "(with-current-buffer (find-file-noselect \"$(TOPIC).org\") (org-html-export-to-html))"
 
 override_dh_auto_install:
 	install -D -m 755 scripts/dsmr-email-admin \
 	    debian/dsmr-email-admin/usr/sbin/dsmr-email-admin
-	install -D -m 644 man/dsmr-email-admin.8 \
-	    debian/dsmr-email-admin/usr/share/man/man8/dsmr-email-admin.8
+
+override_dh_auto_clean:
+	rm -f man/*.8 "$(TOPIC).texi" "$(INFO)" "$(TOPIC).html"

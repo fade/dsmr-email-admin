@@ -1,5 +1,10 @@
 #+TITLE: DSMR Mail Stack — Operations Manual
-#+OPTIONS: toc:2 num:t
+#+AUTHOR: Brian O'Reilly
+#+OPTIONS: toc:2 num:nil
+#+TEXINFO_DIR_CATEGORY: Mail
+#+TEXINFO_DIR_TITLE: dsmr-email-admin: (dsmr-email-admin).
+#+TEXINFO_DIR_DESC: Operations manual for the DSMR qmail/vpopmail/dovecot mail stack
+#+TEXINFO_FILENAME: dsmr-email-admin.info
 
 * Scope
 
@@ -22,24 +27,24 @@ procedures; this is the model they assume.
 
 ** Packages and their roles
 
-| Package                   | Role in the running system                                          |
-|---------------------------+--------------------------------------------------------------------|
-| =fehqlibs=                | DJB-style C libraries (DNS, cdb, stralloc) the rest links against.  |
-| =ucspi-ssl=               | TLS layer: STARTTLS for qmail-smtpd/qmail-remote, =sslserver=.      |
-| =qmail=                   | The MTA: qmail-smtpd, qmail-send, qmail-local/remote, qmail-queue,  |
-|                           | plus the chkuser, qmail-spp, SPF, SRS, spawn-filter and qmail-dkim  |
-|                           | patches compiled in.                                                |
-| =qmail-uids-gids=         | The qmail/vpopmail system accounts.                                 |
-| =libsrs2=                 | Sender Rewriting Scheme library used by the SRS forward path.       |
-| =vpopmail=                | Virtual-domain users/mailboxes in PostgreSQL; =vdelivermail=,       |
-|                           | =vchkpw=, =vrcptcheck=.                                             |
-| =dovecot-vpopmail=        | IMAP/POP retrieval and the SASL auth backend, both against vpopmail.|
-| =checkpassword-dovecot=   | Bridges qmail SMTP-AUTH to dovecot's auth (one passdb for both).    |
-| =dsmr-qmail-run=          | The supervised run scripts + control wiring; claims the MTA role.   |
-| =dsmr-localfirst=         | The opt-in system-first recipient gate (=localfirst-rcptcheck=) and |
-|                           | delivery dispatcher (=localfirst-dispatch=).                        |
-| =dsmr-email-admin=        | This admin tool: health, SPF/DKIM/DMARC DNS, reputation/backscatter.|
-| =dsmr-email-encabulator=  | Metapackage that pulls the whole stack together.                    |
+| Package                  | Role in the running system                                           |
+|--------------------------+----------------------------------------------------------------------|
+| =fehqlibs=               | DJB-style C libraries (DNS, cdb, stralloc) the rest links against.   |
+| =ucspi-ssl=              | TLS layer: STARTTLS for qmail-smtpd/qmail-remote, =sslserver=.       |
+| =qmail=                  | The MTA: qmail-smtpd, qmail-send, qmail-local/remote, qmail-queue,   |
+|                          | plus the chkuser, qmail-spp, SPF, SRS, spawn-filter and qmail-dkim   |
+|                          | patches compiled in.                                                 |
+| =qmail-uids-gids=        | The qmail/vpopmail system accounts.                                  |
+| =libsrs2=                | Sender Rewriting Scheme library used by the SRS forward path.        |
+| =vpopmail=               | Virtual-domain users/mailboxes in PostgreSQL; =vdelivermail=,        |
+|                          | =vchkpw=, =vrcptcheck=.                                              |
+| =dovecot-vpopmail=       | IMAP/POP retrieval and the SASL auth backend, both against vpopmail. |
+| =checkpassword-dovecot=  | Bridges qmail SMTP-AUTH to dovecot's auth (one passdb for both).     |
+| =dsmr-qmail-run=         | The supervised run scripts + control wiring; claims the MTA role.    |
+| =dsmr-localfirst=        | The opt-in system-first recipient gate (=localfirst-rcptcheck=) and  |
+|                          | delivery dispatcher (=localfirst-dispatch=).                         |
+| =dsmr-email-admin=       | This admin tool: health, SPF/DKIM/DMARC DNS, reputation/backscatter. |
+| =dsmr-email-encabulator= | Metapackage that pulls the whole stack together.                     |
 
 ** Email flow
 
@@ -49,68 +54,63 @@ converge on =qmail-smtpd=, which gates the message and hands it to =qmail-queue=
 delivery. Retrieval is entirely separate: dovecot reads the same Maildirs.
 
 #+begin_example
- INBOUND (the world)                         SUBMISSION (your users' MUAs)
-   tcp/25                                       tcp/587
-     │                                            │
-     ▼                                            ▼
- softlimit + tcpserver                       softlimit + tcpserver
-   -x control/tcp.smtp.cdb                     -x control/tcp.submission.cdb
-   (RELAYCLIENT set per source IP)             (open; AUTH is what grants relay)
-     │                                            │
-     └──────────────────┬─────────────────────────┘
+ INBOUND (the world)                       SUBMISSION (your users' MUAs)
+   tcp/25                                     tcp/587
+     │                                          │
+     ▼                                          ▼
+ softlimit + tcpserver                      softlimit + tcpserver
+   -x control/tcp.smtp.cdb                    -x control/tcp.submission.cdb
+   (RELAYCLIENT per source IP)                (open; AUTH grants relay)
+     │                                          │
+     └──────────────────┬───────────────────────┘
                         ▼
- ┌──────────────────────── qmail-smtpd ────────────────────────┐
- │ connection : SMTPD_GREETDELAY, DROP_PRE_GREET, [qmail-spp]   │
- │ EHLO       : HELO_DNS_CHECK; advertise STARTTLS if           │
- │              control/servercert.pem exists                   │
- │ STARTTLS   : opportunistic TLS (ucspi-ssl)                   │
- │ AUTH       : 587 only — SMTPAUTH="!" requires it;            │
- │              AUTH_PROG = checkpassword-dovecot ──────────────┼──► dovecot auth
- │ MAIL FROM  : SPF (control/spfbehavior), FORCEAUTHMAILFROM,   │      socket
- │              badmailfrom                                     │   (vpopmail SQL +
- │ RCPT TO    : the RCPTCHECK gate ───────────────┐            │    system-passwd)
- │ DATA       : control/databytes, [qmail-spp]    │            │
- └────────────────────────────────────────────────┼───────────┘
-                                                   │
-        control/localfirst = 1 ?                   │
-          localfirst-rcptcheck  :  chkuser + rcptcheck-overlimit
-                                                   │ accept
-                                                   ▼
-                                              qmail-queue
-                                                   │
-                                                   ▼
- ┌──────────────────────────── qmail-send ─────────────────────────────┐
- │ route each recipient by control/{locals, virtualdomains,            │
- │ localfirstdomains, rcpthosts}                                        │
- │ if control/filterargs exists: QMAILREMOTE = spawn-filter (outbound  │
- │ signing hook)                                                        │
- └───────────────┬──────────────────────────────────┬──────────────────┘
-   local / virtual│                            remote │
-                  ▼                                   ▼
- ┌──────── qmail-local ────────┐          ┌──────── qmail-remote ───────┐
- │ system user: ~/.qmail,      │          │ STARTTLS outbound (ucspi)   │
- │   Maildir delivery          │          │ SRS envelope rewrite on     │
- │ ~alias/.qmail-default =     │          │   forward (control/srs_*)   │
- │   | fastforward             │          │ DKIM-Signature added by     │
- │       /etc/aliases.cdb      │          │   spawn-filter → qmail-dkim │
- │ vpopmail domain .qmail-     │          │   (control/filterargs)      │
- │   default =                 │          │ smarthost: control/smtproutes│
- │   | localfirst-dispatch     │          └──────────────┬──────────────┘
- │     (hybrid) ── else ──     │                         ▼
- │   | vdelivermail            │                   Internet (recipient MX)
- └──────────────┬──────────────┘
-                ▼
-   vpopmail Maildir
+ ┌────────────────────────── qmail-smtpd ──────────────────────────┐
+ │ connection : SMTPD_GREETDELAY, DROP_PRE_GREET, [qmail-spp]      │
+ │ EHLO       : HELO_DNS_CHECK; STARTTLS if servercert.pem present │
+ │ STARTTLS   : opportunistic TLS (ucspi-ssl)                      │
+ │ AUTH (587) : SMTPAUTH="!"; AUTH_PROG=checkpassword-dovecot      │
+ │              -> dovecot auth (vpopmail SQL + system-passwd)     │
+ │ MAIL FROM  : SPF (control/spfbehavior), FORCEAUTHMAILFROM       │
+ │ RCPT TO    : the RCPTCHECK gate (see below)                     │
+ │ DATA       : control/databytes, [qmail-spp]                     │
+ └─────────────────────────────────────────────────────────────────┘
+                                    │ accept
+              control/localfirst=1 ? localfirst-rcptcheck
+                                    : chkuser + rcptcheck-overlimit
+                                    ▼
+                                qmail-queue
+                                    │
+                                    ▼
+ ┌────────────────────────── qmail-send ───────────────────────────┐
+ │ route each recipient by control/{locals, virtualdomains,        │
+ │ localfirstdomains, rcpthosts}                                   │
+ │ if control/filterargs: QMAILREMOTE = spawn-filter (sign hook)   │
+ └─────────────────────────────────────────────────────────────────┘
+        local / virtual │                              remote │
+                        ▼                                     ▼
+ ┌─────────── qmail-local ───────────┐   ┌────────── qmail-remote ───────────┐
+ │ system user: ~/.qmail, Maildir    │   │ STARTTLS outbound (ucspi-ssl)     │
+ │ ~alias/.qmail-default =           │   │ SRS envelope rewrite on forward   │
+ │   | fastforward /etc/aliases.cdb  │   │   (control/srs_*)                 │
+ │ vpopmail .qmail-default =         │   │ DKIM via spawn-filter ->          │
+ │   | localfirst-dispatch (hybrid)  │   │   qmail-dkim (control/filterargs) │
+ │   else | vdelivermail             │   │ smarthost: control/smtproutes     │
+ └───────────────────────────────────┘   └───────────────────────────────────┘
+                  │                                      │
+                  ▼                                      ▼
+   vpopmail Maildir                          Internet (recipient MX)
    ~vpopmail/domains/<domain>/<user>/Maildir/{new,cur,tmp}
-                │
-                ▼
- ┌──────────── dovecot ────────────┐   IMAP/143  IMAPS/993  POP3/110  POP3S/995
- │ ssl = required                   │   auth: vpopmail SQL + /etc/dovecot/
- │ reads the same Maildirs          │         system-passwd (same backend the
- └──────────────────────────────────┘         submission AUTH uses)
-                ▲
-                │ retrieve
-           MUA / webmail
+                  │
+                  ▼
+ ┌───────────── dovecot ─────────────┐
+ │ ssl = required                    │
+ │ reads the same Maildirs           │
+ └───────────────────────────────────┘
+   IMAP/143  IMAPS/993  POP3/110  POP3S/995
+   auth: vpopmail SQL + system-passwd (same backend submission AUTH uses)
+                  ▲
+                  │ retrieve
+             MUA / webmail
 #+end_example
 
 ** Hook points
@@ -177,54 +177,54 @@ All paths are under =/var/qmail/control/= unless noted. *DSMR-specific* entries
 are flagged; the rest are stock qmail controls this stack relies on.
 
 *** Identity and routing
-| File                 | Meaning                                                        |
-|----------------------+----------------------------------------------------------------|
-| =me=                 | Canonical hostname; default qualifier and Received identity.   |
-| =locals=             | Domains delivered to system accounts (qmail-local).            |
-| =virtualdomains=     | Virtual-domain routing (=domain:vpopmail= → vdelivermail).     |
-| =rcpthosts=          | Domains we accept mail for at all (relay gate).                |
-| =morercpthosts.cdb=  | Overflow rcpthosts in cdb form.                                |
-| =localfirstdomains=  | *DSMR.* Hybrid domains: system-first, vpopmail fallthrough.    |
-| =localfirst=         | *DSMR.* First line =1= enables the localfirst RCPT gate.       |
+| File                | Meaning                                                      |
+|---------------------+--------------------------------------------------------------|
+| =me=                | Canonical hostname; default qualifier and Received identity. |
+| =locals=            | Domains delivered to system accounts (qmail-local).          |
+| =virtualdomains=    | Virtual-domain routing (=domain:vpopmail= → vdelivermail).   |
+| =rcpthosts=         | Domains we accept mail for at all (relay gate).              |
+| =morercpthosts.cdb= | Overflow rcpthosts in cdb form.                              |
+| =localfirstdomains= | *DSMR.* Hybrid domains: system-first, vpopmail fallthrough.  |
+| =localfirst=        | *DSMR.* First line =1= enables the localfirst RCPT gate.     |
 
 *** Inbound gating (qmail-smtpd)
-| File                  | Meaning                                                       |
-|-----------------------+---------------------------------------------------------------|
-| =tcp.smtp.cdb=        | tcpserver policy for :25 (RELAYCLIENT, allow/deny per IP).     |
-| =tcp.submission.cdb=  | tcpserver policy for :587.                                     |
-| =concurrencyincoming= | Max concurrent inbound connections.                           |
-| =softlimit=           | Per-process memory cap.                                        |
-| =databytes=           | Max message size (bytes).                                      |
-| =spfbehavior=         | SPF strictness (0 = off … reject).                            |
-| =smtpplugins=         | qmail-spp plugin config (with the =plugins/= dir).            |
-| =servercert.pem=      | TLS cert+key for STARTTLS (shared with dovecot).             |
+| File                  | Meaning                                                    |
+|-----------------------+------------------------------------------------------------|
+| =tcp.smtp.cdb=        | tcpserver policy for :25 (RELAYCLIENT, allow/deny per IP). |
+| =tcp.submission.cdb=  | tcpserver policy for :587.                                 |
+| =concurrencyincoming= | Max concurrent inbound connections.                        |
+| =softlimit=           | Per-process memory cap.                                    |
+| =databytes=           | Max message size (bytes).                                  |
+| =spfbehavior=         | SPF strictness (0 = off … reject).                         |
+| =smtpplugins=         | qmail-spp plugin config (with the =plugins/= dir).         |
+| =servercert.pem=      | TLS cert+key for STARTTLS (shared with dovecot).           |
 
 *** Aliasing and local delivery
-| File / path                     | Meaning                                            |
-|---------------------------------+----------------------------------------------------|
-| =/etc/aliases= → =/etc/aliases.cdb= | System aliases; rebuild with =newaliases=.     |
-| =~alias/.qmail-default=         | =| fastforward /etc/aliases.cdb= catch-all.        |
-| =~user/.qmail[-ext]=            | Per-user delivery / extension addressing.          |
-| =~vpopmail/domains/<d>/.qmail-default= | vpopmail catch-all (vdelivermail or dispatch).|
+| File / path                            | Meaning                                        |                                          |
+|----------------------------------------+------------------------------------------------+------------------------------------------|
+| =/etc/aliases= → =/etc/aliases.cdb=    | System aliases; rebuild with =newaliases=.     |                                          |
+| =~alias/.qmail-default=                | =                                              | fastforward /etc/aliases.cdb= catch-all. |
+| =~user/.qmail[-ext]=                   | Per-user delivery / extension addressing.      |                                          |
+| =~vpopmail/domains/<d>/.qmail-default= | vpopmail catch-all (vdelivermail or dispatch). |                                          |
 
 *** Outbound (qmail-send / qmail-remote)
-| File                | Meaning                                                         |
-|---------------------+-----------------------------------------------------------------|
-| =filterargs=        | *DSMR.* Enables spawn-filter; per-domain DKIM signing via       |
-|                     | qmail-dkim (=DKIMSIGNKEYDIR=, keys in =control/domainkeys/=).   |
-| =srs_domain=        | SRS rewrite domain (enables SRS); plus =srs_secrets=,           |
-|                     | =srs_maxage=, =srs_hashlength=, =srs_separator=.                |
-| =smtproutes=        | Smarthost / per-domain next-hop routing.                        |
-| =tlshosts= / =notlshosts= | Force / skip outbound STARTTLS per host.                 |
-| =helohost=, =outgoingip=  | Outbound HELO name and source IP.                        |
-| =concurrencyremote=, =queuelifetime= | Outbound concurrency and retry window.       |
+| File                                 | Meaning                                                       |
+|--------------------------------------+---------------------------------------------------------------|
+| =filterargs=                         | *DSMR.* Enables spawn-filter; per-domain DKIM signing via     |
+|                                      | qmail-dkim (=DKIMSIGNKEYDIR=, keys in =control/domainkeys/=). |
+| =srs_domain=                         | SRS rewrite domain (enables SRS); plus =srs_secrets=,         |
+|                                      | =srs_maxage=, =srs_hashlength=, =srs_separator=.              |
+| =smtproutes=                         | Smarthost / per-domain next-hop routing.                      |
+| =tlshosts= / =notlshosts=            | Force / skip outbound STARTTLS per host.                      |
+| =helohost=, =outgoingip=             | Outbound HELO name and source IP.                             |
+| =concurrencyremote=, =queuelifetime= | Outbound concurrency and retry window.                        |
 
 *** Retrieval and auth (dovecot / vpopmail)
-| File / path                          | Meaning                                       |
-|--------------------------------------+-----------------------------------------------|
-| =/home/vpopmail/etc/vpopmail.pgsql=  | PostgreSQL backend creds (dovecot reads same).|
-| =/etc/dovecot/system-passwd=         | Curated system users for SMTP-AUTH + IMAP.    |
-| =/etc/dovecot/conf.d/*vpopmail*=     | Auth, mail_location, master, SSL config.      |
+| File / path                         | Meaning                                        |
+|-------------------------------------+------------------------------------------------|
+| =/home/vpopmail/etc/vpopmail.pgsql= | PostgreSQL backend creds (dovecot reads same). |
+| =/etc/dovecot/system-passwd=        | Curated system users for SMTP-AUTH + IMAP.     |
+| =/etc/dovecot/conf.d/*vpopmail*=    | Auth, mail_location, master, SSL config.       |
 
 A control file that is absent is simply "feature off"; the stack never invents
 one silently. Where =dsmr-email-admin= manages a control file (DKIM keys, SPF,
@@ -237,12 +237,12 @@ Several stack control files are written by a package postinst *only if absent*
 provisioned before a packaging fix keeps the old, broken value forever. The
 recurring faults and their repair:
 
-| Symptom                                              | Cause                                   | Fix                              |
-|------------------------------------------------------+-----------------------------------------+----------------------------------|
-| smtpd dies "failed to map segment" (libgssapi/krb5)  | control/softlimit too low for OpenSSL3  | =fix softlimit=                  |
-| vpopmail/dovecot can't auth to PostgreSQL            | vpopmail.pgsql password/database swapped| =fix pgsql-config=               |
-| dovecot auth returns temp_fail                       | dovecot SQL conf out of sync            | =fix dovecot-sql=                |
-| no virtual-user auth/delivery; lost after reboot     | vpopmail's pg cluster stopped/disabled  | =fix pg-cluster=                 |
+| Symptom                                             | Cause                                    | Fix                |
+|-----------------------------------------------------+------------------------------------------+--------------------|
+| smtpd dies "failed to map segment" (libgssapi/krb5) | control/softlimit too low for OpenSSL3   | =fix softlimit=    |
+| vpopmail/dovecot can't auth to PostgreSQL           | vpopmail.pgsql password/database swapped | =fix pgsql-config= |
+| dovecot auth returns temp_fail                      | dovecot SQL conf out of sync             | =fix dovecot-sql=  |
+| no virtual-user auth/delivery; lost after reboot    | vpopmail's pg cluster stopped/disabled   | =fix pg-cluster=   |
 
 #+begin_src sh
 dsmr-email-admin check                 # read-only audit of the whole stack
