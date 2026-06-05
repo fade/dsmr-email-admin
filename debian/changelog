@@ -1,3 +1,16 @@
+dsmr-email-admin (1.0-7) trixie; urgency=low
+
+  * OPERATIONS.org: add an Architecture section — package roles, an end-to-end
+    email-flow diagram, the ordered hook points (tcprules, greet defences, TLS,
+    AUTH, SPF, qmail-spp, the RCPT gate, routing, aliasing, outbound DKIM/SRS,
+    retrieval), and a control-file reference grouped by stage.
+  * Update the backscatter and localfirst sections to reflect that localfirst
+    1.0-6 now rejects unknown system recipients at RCPT by reading the
+    fastforward cdb (the former "catch-all blind spot" and the -p interim are
+    superseded); document that the cdb must be kept in sync via newaliases.
+
+ -- Brian O'Reilly <fade@deepsky.com>  Fri, 05 Jun 2026 02:36:18 +0000
+
 dsmr-email-admin (1.0-6) trixie; urgency=low
 
   * Ship doc/OPERATIONS.org, an operations manual for the DSMR mail stack:
